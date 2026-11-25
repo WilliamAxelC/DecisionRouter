@@ -21,6 +21,7 @@ export type SpecialistKind =
 export type DecisionSource =
   | "passthrough"
   | "header"
+  | "pre_gate"
   | "self_answer"
   | "cache_sticky"
   | "escalation"
@@ -89,10 +90,17 @@ export type CanonicalToolChoice =
   | { type: "required" }
   | { type: "tool"; name: string };
 
+export interface CanonicalSystemBlock {
+  type: "text";
+  text: string;
+  cacheControl?: { type: string };
+}
+
 export interface CanonicalRequest {
   protocol: IncomingProtocol;
   requestedModel: string;
   system?: string;
+  systemBlocks?: CanonicalSystemBlock[];
   messages: CanonicalMessage[];
   tools?: CanonicalTool[];
   toolChoice?: CanonicalToolChoice;
@@ -160,6 +168,8 @@ export interface RoutingDecision {
   decisionMs: number;
   cacheSticky: boolean;
   escalated: boolean;
+  cascadeRetried?: boolean;
+  riskScore?: number;
   selfHandled: boolean;
   selfAnswer?: string;
   failovers: number;

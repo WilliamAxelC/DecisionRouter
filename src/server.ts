@@ -52,7 +52,11 @@ function buildRouterHeaders(decision: RoutingDecision): Record<string, string> {
     "X-Router-Decision-Ms": String(decision.decisionMs),
     "X-Router-Cache-Sticky": String(decision.cacheSticky),
     "X-Router-Escalated": String(decision.escalated),
+    "X-Router-Cascade-Retried": String(Boolean(decision.cascadeRetried)),
     "X-Router-Self-Handled": String(decision.selfHandled),
+    ...(decision.riskScore !== undefined
+      ? { "X-Router-Risk-Score": String(decision.riskScore) }
+      : {}),
     "X-Router-Failovers": String(decision.failovers),
   };
 }

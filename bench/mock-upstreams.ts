@@ -59,7 +59,7 @@ function simulateFastClassifier(compactPayloadJson: string): {
   }
 
   if (
-    /\b(stale closure|abortcontroller|fencing-token|deadlock|40p01|zero-downtime|memory leak|heap-snapshot|race condition|idempotent|advisory lock|refresh token rotation|refactor.*middleware)\b/i.test(
+    /\b(stale closure|abortcontroller|fencing-token|deadlock|40p01|zero-downtime|memory leak|heap-snapshot|race condition|idempotent|advisory lock|refresh token rotation|refactor.*middleware|cache poisoning|leader-lease|linearizable|audit and refactor)\b/i.test(
       recentTurn,
     )
   ) {

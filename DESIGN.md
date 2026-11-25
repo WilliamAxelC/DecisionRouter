@@ -29,13 +29,17 @@ For every incoming `/v1/chat/completions` or `/v1/messages` request:
 5. **Mid-Loop Cache-Stickiness Fast-Path (`<1ms`, 0 quota)**:
    - Active tool-loop continuations stay on the warm session model when healthy instead of spending free-tier classifier RPM.
    - On new user turns where the classifier wants to downgrade, `shouldStayCacheSticky()` compares `cached_read_cost(active) + delta + output` vs `full_uncached_prefill(cheaper) + output` and keeps the warm model unless switching saves at least 5%.
-6. **Gemini Free-Tier Decision Waterfall, Inline `"self"` Tier & Silent Fallback**:
-   - Checks short-TTL decision cache first.
-   - Calls Google AI Studio `generateContent` with `responseMimeType: "application/json"`, strict enum `responseSchema`, `temperature: 0`, and `timeoutMs: 600`.
-   - When `allowSelfAnswer` is enabled (and the request has no tools, no images, is not a tool-loop continuation, and is within `selfAnswerMaxInputTokens`), the classifier may choose `tier: "self"` and populate `directAnswer` to handle pure decision/triage/classification tasks inline with **zero upstream hops** and `$0.00` upstream cost.
-   - Waterfalls across `(model, apiKey)` pairs (default: `gemini-2.5-flash-lite` -> `gemini-2.5-flash`), enforcing local sliding-window RPM and UTC daily RPD tracking plus 60s cooldown on `429`.
-   - Falls back silently to deterministic heuristics on timeout or exhausted quota so client requests never fail.
-7. **Upstream Translation & Pre-Stream Failover**:
-   - Translates Canonical IR to OpenAI (`/chat/completions`), Anthropic (`/messages`), or Gemini native (`:generateContent` / `:streamGenerateContent?alt=sse`), including streaming SSE and tool calls.
-   - Strips foreign `thinking` blocks across providers while preserving Anthropic `thinking` + `signature` when targeting Anthropic.
-   - Retries pre-stream `408`/`429`/`5xx`/network errors across ordered tier candidates with a per-model circuit breaker.
+6. **Multi-Probe `gemini-decision-1`, Dual-Gated `"self"` Tier & Pre-Gates**:
+   - `<1ms` Pre-gate handles trivial pings/greetings without spending decision quota.
+   - Calls Google AI Studio `POST /v1beta/decisions` (`gemini-decision-1`, zero output tokens) with a single multi-probe prefill pass: `error_risk` (`noul`), `needs_reasoning` (`noul`), `difficulty` (`score`, 0–4), `user_is_correcting` (`noul` on multi-turn), and `self_answer` (`choice` when discrete options exist).
+   - Combines probes into `riskScore = 0.40*error_risk + 0.35*needs_reasoning + 0.25*(difficulty/4)` and compares against profile thresholds (`auto:quality`, `auto:balanced`, `auto:eco`).
+   - Dual-gates `"self"`: only answers inline (`0` upstream hops) when `self_answer.confidence >= selfConfidenceMin` AND `riskScore < selfMaxRisk`.
+   - Falls back to `generateContent` waterfall or deterministic heuristics if needed.
+7. **Smart Escalation, Context Inertia & Cascade Verification**:
+   - Escalates immediately on `consecutiveToolErrors >= 2`, repeated tool loops, fuzzy `editFailOscillation`, regex pushback, or `user_is_correcting >= 0.65`, locking an escalation floor for `escalationLockTurns` turns.
+   - Short-follow-up context-trap inertia preserves `complex`/`frontier` tier across short referential follow-ups.
+   - Non-streaming structural/decision cascade verification retries failed light responses on a higher tier (`X-Router-Cascade-Retried: true`).
+8. **Protocol Hardening & Upstream Failover**:
+   - Preserves Anthropic `system` `cache_control` breakpoints and thinking signatures (`anthropic` only).
+   - Recursively sanitizes messy MCP JSON Schemas (`$schema`, `additionalProperties`, nullable `anyOf`, empty `properties`) for Gemini `functionDeclarations`.
+   - Retries pre-stream `408`/`429`/`5xx`/network errors across ordered tier candidates with per-model circuit breakers and permanent `401`/`403` key quarantine.

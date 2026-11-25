@@ -242,6 +242,48 @@ profiles:
     cacheStickyEnabled: true
     cacheTtlSec: 300
     escalationEnabled: true
+    allowSelfAnswer: true
+    highRiskThreshold: 0.32
+    frontierRiskThreshold: 0.78
+    selfConfidenceMin: 0.85
+    selfMaxRisk: 0.38
+    cascadeVerifyEnabled: true
+    escalationLockTurns: 2
+    contextInertiaEnabled: true
+    baselineModel: "anthropic/claude-opus-4-6"
+
+  "auto:quality":
+    defaultTier: "standard"
+    minTier: "trivial"
+    maxTier: "frontier"
+    cacheStickyEnabled: true
+    cacheTtlSec: 300
+    escalationEnabled: true
+    allowSelfAnswer: true
+    highRiskThreshold: 0.30
+    frontierRiskThreshold: 0.78
+    selfConfidenceMin: 0.88
+    selfMaxRisk: 0.35
+    cascadeVerifyEnabled: true
+    escalationLockTurns: 2
+    contextInertiaEnabled: true
+    baselineModel: "anthropic/claude-opus-4-6"
+
+  "auto:balanced":
+    defaultTier: "standard"
+    minTier: "trivial"
+    maxTier: "frontier"
+    cacheStickyEnabled: true
+    cacheTtlSec: 300
+    escalationEnabled: true
+    allowSelfAnswer: true
+    highRiskThreshold: 0.45
+    frontierRiskThreshold: 0.80
+    selfConfidenceMin: 0.80
+    selfMaxRisk: 0.45
+    cascadeVerifyEnabled: true
+    escalationLockTurns: 2
+    contextInertiaEnabled: true
     baselineModel: "anthropic/claude-opus-4-6"
 
   "auto:eco":
@@ -251,6 +293,14 @@ profiles:
     cacheStickyEnabled: true
     cacheTtlSec: 300
     escalationEnabled: true
+    allowSelfAnswer: true
+    highRiskThreshold: 0.62
+    frontierRiskThreshold: 0.88
+    selfConfidenceMin: 0.72
+    selfMaxRisk: 0.55
+    cascadeVerifyEnabled: false
+    escalationLockTurns: 1
+    contextInertiaEnabled: true
     baselineModel: "anthropic/claude-opus-4-6"
 
   "auto:coding":

@@ -11,7 +11,10 @@ export interface RequestFeatures {
   isToolLoopContinuation: boolean;
   consecutiveToolErrors: number;
   repeatedToolLoop: boolean;
+  editFailOscillation: boolean;
   userCorrectionSignal: boolean;
+  isTrivialPing: boolean;
+  isShortReferentialFollowUp: boolean;
   trimmedRecentTurn: string;
   lastUserText: string;
   prefixHash: string;
@@ -24,6 +27,9 @@ const TOOL_ERROR_REGEX =
 const USER_CORRECTION_REGEX =
   /^\s*(no[,!.\s]|nope[,!.\s]|wrong|that(?:'s| is) wrong|not quite|try again|still (?:broken|failing|fails|wrong|doesn't work|not working)|that didn't work|stop doing that|fix that|you broke)/i;
 
+const TRIVIAL_PING_REGEX =
+  /^\s*(hi|hello|hey|yo|sup|ping|test|thanks|thank you|ok|okay|cool|got it)[!.\s?]*$/i;
+
 function estimateCharsForMessage(msg: CanonicalMessage): number {
   let chars = 16;
   for (const b of msg.content) {
@@ -31,7 +37,7 @@ function estimateCharsForMessage(msg: CanonicalMessage): number {
     else if (b.type === "thinking") chars += b.thinking.length;
     else if (b.type === "tool_use") chars += b.name.length + JSON.stringify(b.input ?? {}).length;
     else if (b.type === "tool_result") chars += b.content.length;
-    else if (b.type === "image") chars += 1000; // image token equivalent (~250+ tokens)
+    else if (b.type === "image") chars += 1000;
   }
   return chars;
 }
@@ -55,6 +61,16 @@ function summarizeMessageForClassifier(msg: CanonicalMessage): string {
 
 function sha256Short(input: string): string {
   return crypto.createHash("sha256").update(input).digest("hex").slice(0, 24);
+}
+
+function extractTargetFromToolInput(input: Record<string, unknown>): string | null {
+  for (const key of ["path", "file", "file_path", "target", "command"]) {
+    const v = input[key];
+    if (typeof v === "string" && v.trim().length > 0) {
+      return v.trim();
+    }
+  }
+  return null;
 }
 
 export function extractFeatures(
@@ -106,18 +122,32 @@ export function extractFeatures(
     }
   }
 
-  // Detect repeated near-identical tool_use calls in recent assistant turns
+  // Detect repeated near-identical tool_use calls AND fuzzy edit-fail oscillation on same file/target
   const recentToolSignatures: string[] = [];
+  const recentTargetCounts = new Map<string, number>();
+  let recentErrorCount = 0;
+
   for (let i = Math.max(0, req.messages.length - 8); i < req.messages.length; i++) {
     const msg = req.messages[i];
-    if (msg.role !== "assistant") continue;
     for (const b of msg.content) {
-      if (b.type === "tool_use") {
+      if (msg.role === "assistant" && b.type === "tool_use") {
         const sig = `${b.name}:${sha256Short(JSON.stringify(b.input ?? {}))}`;
         recentToolSignatures.push(sig);
+
+        const target = extractTargetFromToolInput(b.input ?? {});
+        if (target && /edit|write|patch|update|run|test/i.test(b.name)) {
+          const tk = `${b.name}:${target}`;
+          recentTargetCounts.set(tk, (recentTargetCounts.get(tk) ?? 0) + 1);
+        }
+      } else if (
+        b.type === "tool_result" &&
+        (b.isError || TOOL_ERROR_REGEX.test(b.content))
+      ) {
+        recentErrorCount += 1;
       }
     }
   }
+
   const sigCounts = new Map<string, number>();
   let repeatedToolLoop = false;
   for (const sig of recentToolSignatures) {
@@ -128,6 +158,10 @@ export function extractFeatures(
       break;
     }
   }
+
+  const editFailOscillation =
+    recentErrorCount >= 1 &&
+    [...recentTargetCounts.values()].some((count) => count >= 2);
 
   // Find latest user text message (non-tool-result)
   let lastUserText = "";
@@ -152,6 +186,21 @@ export function extractFeatures(
     lastUserText.length <= 280 &&
     USER_CORRECTION_REGEX.test(lastUserText);
 
+  const isTrivialPing =
+    req.messages.length <= 2 &&
+    toolNames.length === 0 &&
+    !hasImages &&
+    lastUserText.length > 0 &&
+    lastUserText.length <= 40 &&
+    TRIVIAL_PING_REGEX.test(lastUserText);
+
+  const isShortReferentialFollowUp =
+    req.messages.length >= 3 &&
+    !isToolLoopContinuation &&
+    lastUserText.length > 0 &&
+    lastUserText.length <= 160 &&
+    !TRIVIAL_PING_REGEX.test(lastUserText);
+
   // Build compact trimmed snippet of last 1-2 turns within maxContextChars
   const tailSlice = req.messages.slice(-2);
   const rawSummary = tailSlice.map(summarizeMessageForClassifier).join("\n");
@@ -160,7 +209,6 @@ export function extractFeatures(
       ? rawSummary.slice(rawSummary.length - maxContextChars)
       : rawSummary;
 
-  // Rolling prefix hash: system + first up to 3 messages so multi-turn/tool-loop requests correlate
   const prefixAnchor = [
     req.system ? req.system.slice(0, 512) : "",
     ...req.messages.slice(0, 3).map((m) => summarizeMessageForClassifier(m).slice(0, 256)),
@@ -181,7 +229,10 @@ export function extractFeatures(
     isToolLoopContinuation,
     consecutiveToolErrors,
     repeatedToolLoop,
+    editFailOscillation,
     userCorrectionSignal,
+    isTrivialPing,
+    isShortReferentialFollowUp,
     trimmedRecentTurn,
     lastUserText,
     prefixHash,

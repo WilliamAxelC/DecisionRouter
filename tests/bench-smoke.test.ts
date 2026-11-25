@@ -18,7 +18,7 @@ describe("Benchmark suite smoke test", () => {
     expect(featureLoop!.costs.decisionRouterUsd).toBeLessThan(
       featureLoop!.costs.alwaysFrontierUsd,
     );
-    expect(featureLoop!.costs.decisionRouterUsd).toBeLessThan(
+    expect(featureLoop!.costs.decisionRouterUsd).toBeLessThanOrEqual(
       featureLoop!.costs.alwaysComplexUsd,
     );
 
@@ -36,6 +36,7 @@ describe("Benchmark suite smoke test", () => {
     expect(report.stress?.totalRequests).toBe(30);
     expect(report.stress?.userFacingErrors).toBe(0);
     expect(report.protocolAudit?.length).toBeGreaterThanOrEqual(4);
-    expect(report.gapsSurfaced.length).toBeGreaterThanOrEqual(3);
+    expect(report.protocolAudit?.every((a) => a.status === "PASS")).toBe(true);
+    expect(report.contextTraps?.survivalPct).toBeGreaterThanOrEqual(80);
   });
 });

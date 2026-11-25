@@ -1,7 +1,10 @@
 import http from "node:http";
 import { RouterConfigSchema, type RouterConfig } from "../../src/config/schema.js";
 import { INDUSTRY_TASKS } from "./datasets.js";
+import { HELDOUT_TASKS } from "./heldout.js";
 import type { GradeSpec } from "../text-eval/grader.js";
+
+const ALL_MOCK_TASKS = [...INDUSTRY_TASKS, ...HELDOUT_TASKS];
 
 export interface IndustryMockServers {
   classifierUrl: string;
@@ -57,11 +60,22 @@ const LIGHT_WRONG_OVERRIDES: Record<string, string> = {
   "crux-sql-left-join": "FINAL: 1",
   "crux-recursion-count": "FINAL: 5",
 
-  // CRT Turn 1 intuition traps (light model falls for intuition on 4/4)
+  // CRT Turn 1 intuition traps (light model falls for intuition on 4/4 + heldout CRT)
   "crt-bat-and-ball": "FINAL: 0.10",
   "crt-lily-pad": "FINAL: 24",
   "crt-percent-symmetry": "FINAL: 5",
   "crt-widgets-machines": "FINAL: 100",
+
+  // Heldout 21-task calibrated light misses
+  "ho-mmlu-hard": "FINAL: A",
+  "ho-gsm-med": "FINAL: 76",
+  "ho-gsm-hard": "FINAL: 630",
+  "ho-bbh-hard": "FINAL: Casey",
+  "ho-arc-hard": "FINAL: B",
+  "ho-tqa-crt": "FINAL: 10",
+  "ho-crux-med": "FINAL: 50",
+  "ho-crux-hard": "FINAL: 7",
+  "ho-sglue-hard": '{"grant":true,"reason":"ELIGIBLE"}',
 };
 
 function extractPlainTextFromBody(body: Record<string, unknown>): string {
@@ -90,13 +104,16 @@ function extractPlainTextFromBody(body: Record<string, unknown>): string {
 }
 
 function findTaskForText(text: string) {
-  // Match specific task snippets by checking unique prompt substrings
-  for (const t of INDUSTRY_TASKS) {
-    const key = t.prompt.slice(0, 48);
+  // Prefer full prompt match first to avoid prefix collisions on shared templates
+  for (const t of ALL_MOCK_TASKS) {
+    if (text.includes(t.prompt)) return t;
+  }
+  for (const t of ALL_MOCK_TASKS) {
+    const key = t.prompt.slice(0, 64);
     if (text.includes(key)) return t;
   }
   // Check correctionPrompts for Turn 2 CRT
-  for (const t of INDUSTRY_TASKS) {
+  for (const t of ALL_MOCK_TASKS) {
     if (t.correctionPrompt && text.includes(t.correctionPrompt.slice(0, 40))) {
       return t;
     }
@@ -151,29 +168,37 @@ function simulateDecisionsApi(
 
     return {
       answers: {
-        route: { choice: "self", confidence: 0.94, type: "choice" },
-        self_answer: { choice: chosenAns, confidence: 0.91, type: "choice" },
+        error_risk: { noul: 0.12, confidence: 0.88, type: "noul" },
+        needs_reasoning: { noul: 0.08, confidence: 0.92, type: "noul" },
+        difficulty: { score: 0.4, confidence: 0.85, type: "score" },
+        self_answer: { choice: chosenAns, confidence: 0.94, type: "choice" },
       },
     };
   }
 
-  if (task.difficulty === "hard" && !task.id.startsWith("crt-")) {
+  if (task.difficulty === "hard" && !task.id.startsWith("crt-") && task.id !== "ho-tqa-crt") {
     return {
       answers: {
-        route: { choice: "complex", confidence: 0.9, type: "choice" },
+        error_risk: { noul: 0.86, confidence: 0.86, type: "noul" },
+        needs_reasoning: { noul: 0.91, confidence: 0.91, type: "noul" },
+        difficulty: { score: 3.1, confidence: 0.72, type: "score" },
       },
     };
   }
   if (task.difficulty === "medium") {
     return {
       answers: {
-        route: { choice: "standard", confidence: 0.86, type: "choice" },
+        error_risk: { noul: 0.42, confidence: 0.58, type: "noul" },
+        needs_reasoning: { noul: 0.48, confidence: 0.52, type: "noul" },
+        difficulty: { score: 1.9, confidence: 0.65, type: "score" },
       },
     };
   }
   return {
     answers: {
-      route: { choice: "trivial", confidence: 0.89, type: "choice" },
+      error_risk: { noul: 0.14, confidence: 0.86, type: "noul" },
+      needs_reasoning: { noul: 0.12, confidence: 0.88, type: "noul" },
+      difficulty: { score: 0.7, confidence: 0.8, type: "score" },
     },
   };
 }
@@ -301,6 +326,7 @@ export async function startIndustryMockServers(opts?: {
 export function buildIndustrySimConfig(
   mocks: IndustryMockServers,
   liveClassifierConfig?: RouterConfig["decisionModel"],
+  profilesOverride?: RouterConfig["profiles"],
 ): RouterConfig {
   return RouterConfigSchema.parse({
     server: { dashboardEnabled: false },
@@ -366,7 +392,7 @@ export function buildIndustrySimConfig(
       complex: [{ provider: "smart", model: "gemini-4-hydrogen" }],
       frontier: [{ provider: "smart", model: "gemini-4-hydrogen" }],
     },
-    profiles: {
+    profiles: profilesOverride ?? {
       auto: {
         defaultTier: "standard",
         minTier: "trivial",

@@ -5,6 +5,7 @@ import type {
   CanonicalResponse,
   CanonicalStopReason,
   CanonicalStreamEvent,
+  CanonicalSystemBlock,
   CanonicalTool,
   CanonicalToolChoice,
 } from "../types/ir.js";
@@ -17,23 +18,41 @@ function normalizeHeaders(headers: Record<string, string>): Record<string, strin
   return out;
 }
 
-function parseAnthropicSystem(system: unknown): string | undefined {
+function parseAnthropicSystem(system: unknown): {
+  systemText?: string;
+  systemBlocks?: CanonicalSystemBlock[];
+} {
   if (typeof system === "string") {
-    return system.length > 0 ? system : undefined;
+    return { systemText: system.length > 0 ? system : undefined };
   }
   if (Array.isArray(system)) {
-    const parts = system
-      .map((item) => {
-        if (typeof item === "string") return item;
-        if (item && typeof item === "object" && "text" in item) {
-          return String((item as { text: unknown }).text ?? "");
+    const blocks: CanonicalSystemBlock[] = [];
+    for (const item of system) {
+      if (typeof item === "string" && item.length > 0) {
+        blocks.push({ type: "text", text: item });
+      } else if (item && typeof item === "object" && "text" in item) {
+        const obj = item as Record<string, unknown>;
+        const txt = String(obj.text ?? "");
+        const cc =
+          obj.cache_control && typeof obj.cache_control === "object"
+            ? { type: String((obj.cache_control as Record<string, unknown>).type ?? "ephemeral") }
+            : undefined;
+        if (txt.length > 0 || cc) {
+          blocks.push({
+            type: "text",
+            text: txt,
+            ...(cc ? { cacheControl: cc } : {}),
+          });
         }
-        return "";
-      })
-      .filter(Boolean);
-    return parts.length > 0 ? parts.join("\n\n") : undefined;
+      }
+    }
+    const textJoined = blocks.map((b) => b.text).filter(Boolean).join("\n\n");
+    return {
+      systemText: textJoined.length > 0 ? textJoined : undefined,
+      systemBlocks: blocks.length > 0 ? blocks : undefined,
+    };
   }
-  return undefined;
+  return {};
 }
 
 function parseToolResultContent(content: unknown): string {
@@ -156,10 +175,13 @@ export function parseAnthropicRequest(
     ? body.stop_sequences.map(String)
     : undefined;
 
+  const parsedSystem = parseAnthropicSystem(body.system);
+
   return {
     protocol: "anthropic",
     requestedModel: String(body.model ?? "auto"),
-    system: parseAnthropicSystem(body.system),
+    system: parsedSystem.systemText,
+    ...(parsedSystem.systemBlocks ? { systemBlocks: parsedSystem.systemBlocks } : {}),
     messages,
     tools,
     toolChoice,

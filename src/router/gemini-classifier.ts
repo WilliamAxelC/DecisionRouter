@@ -3,6 +3,15 @@ import { joinUrl } from "../providers/base.js";
 import type { RoutingTier, SpecialistKind } from "../types/ir.js";
 import type { RequestFeatures } from "./features.js";
 
+export interface DecisionSignals {
+  errorRisk: number;
+  needsReasoning: number;
+  difficultyScore: number;
+  riskScore: number;
+  userIsCorrecting?: number;
+  selfAnswerConfidence?: number;
+}
+
 export interface ClassifierDecision {
   tier: RoutingTier;
   specialist?: SpecialistKind;
@@ -10,6 +19,8 @@ export interface ClassifierDecision {
   reason: string;
   classifierModel: string;
   directAnswer?: string;
+  riskScore?: number;
+  signals?: DecisionSignals;
 }
 
 export interface QuotaBucketStatus {
@@ -58,6 +69,14 @@ Keep "reason" under 80 characters.`;
 const SELF_ANSWER_ADDENDUM = `
 - "self": ONLY for pure decision, classification, triage, yes/no, label-picking, or tiny deterministic extraction tasks that need NO tools, NO multi-step reasoning, and NO long generation. When choosing "self", you MUST populate "directAnswer" with the exact final answer matching any requested output format.`;
 
+const DIFFICULTY_LEVELS: string[] = [
+  "Trivial greeting, label classification, simple lookup, or single-step formatting",
+  "Simple fact, basic conversion, or straightforward single-step edit",
+  "Moderate multi-step QA, reading comprehension, or simple script",
+  "Hard multi-step math, code execution trace, logic puzzle, subtle bug, or tricky domain analysis",
+  "Frontier system architecture, distributed consensus, security threat model, or formal proof",
+];
+
 function isAuthErrorResponse(status: number, bodyText: string): boolean {
   if (status === 401 || status === 403) return true;
   if (status === 400) {
@@ -73,14 +92,38 @@ export interface DiscreteChoiceQuestion {
 }
 
 /**
- * Extracts an explicit finite uppercase discrete choice set (2-20 options) from
- * classification/triage prompts so `gemini-decision-1` can answer inline via `choice`.
- * Returns null for open-ended JSON, code, or math prompts.
+ * Extracts an explicit finite discrete choice set (2-20 options) from
+ * classification, MCQ, boolean, or binary/enum JSON-template prompts so
+ * `gemini-decision-1` can answer inline via `choice`.
  */
 export function extractDiscreteChoiceQuestion(
   prompt: string,
 ): DiscreteChoiceQuestion | null {
-  if (!prompt || /return\s+only\s+json|```/i.test(prompt)) {
+  if (!prompt || /```/.test(prompt)) {
+    return null;
+  }
+
+  // Detect explicit enumerated JSON templates: e.g. Return ONLY JSON: {"a":1} or {"a":2}
+  const jsonOptionMatches = [...prompt.matchAll(/\{[^{}\n\r]{3,140}\}/g)].map((m) =>
+    m[0].trim(),
+  );
+  if (
+    /return\s+only\s+json/i.test(prompt) &&
+    jsonOptionMatches.length >= 2 &&
+    jsonOptionMatches.length <= 8
+  ) {
+    const uniqueJson = [...new Set(jsonOptionMatches)];
+    if (uniqueJson.length >= 2) {
+      return {
+        instructions: prompt.replace(/Return\s+ONLY\s+JSON:.*$/is, "").trim().slice(0, 400) ||
+          "Choose the exact JSON object matching the policy.",
+        options: uniqueJson,
+        useFinalPrefix: false,
+      };
+    }
+  }
+
+  if (/return\s+only\s+json/i.test(prompt)) {
     return null;
   }
 
@@ -215,35 +258,36 @@ export class GeminiDecisionClassifier {
       ? extractDiscreteChoiceQuestion(sourcePrompt)
       : null;
 
-    const routeCriteria: Record<string, string> = {
-      ...(discreteChoice
-        ? {
-            self: "Pure classification, sentiment, triage, yes/no, or discrete label selection among the explicit options, requiring zero multi-step reasoning or free-form generation.",
-          }
-        : {}),
-      trivial:
-        "Very simple formatting, greeting, lookup, single-step conversion, or short factual prompt.",
-      standard:
-        "Moderate coding edit, SQL query, routine Q&A, or straightforward multi-step calculation.",
-      complex:
-        "Hard multi-step reasoning, subtle debugging, concurrency, database deadlocks, logic puzzles, or architecture.",
-      frontier:
-        "Highest-stakes distributed consensus, security threat modeling, or deep system architecture.",
-    };
-
     const questions: Record<string, unknown> = {
-      route: {
-        type: "choice",
+      error_risk: {
+        type: "noul",
         instructions:
-          "Select the lowest capability tier that will reliably produce an accurate answer for this request.",
-        criteria: routeCriteria,
+          "Could a lightweight fast LLM make a subtle math, logic, code-execution, edge-case, or factual mistake on this request?",
+      },
+      needs_reasoning: {
+        type: "noul",
+        instructions:
+          "Does answering this request accurately require multi-step math, code execution tracing, deductive logic, SQL/regex tracing, or catching a subtle trap?",
+      },
+      difficulty: {
+        type: "score",
+        instructions: "Rate the task reasoning difficulty from level 0 (trivial) to level 4 (frontier).",
+        criteria: DIFFICULTY_LEVELS,
       },
     };
+
+    if (features.messageCount >= 3 && !features.isToolLoopContinuation) {
+      questions.user_is_correcting = {
+        type: "noul",
+        instructions:
+          "Is the latest user message correcting, pushing back on, questioning, or reporting a mistake or failure in the assistant's prior response?",
+      };
+    }
 
     if (discreteChoice) {
       const choiceCriteria: Record<string, string> = {};
       for (const opt of discreteChoice.options) {
-        choiceCriteria[opt] = `Select ${opt} if ${opt} is the correct answer.`;
+        choiceCriteria[opt] = `Select ${opt} if ${opt} is the exact correct answer.`;
       }
       questions.self_answer = {
         type: "choice",
@@ -284,43 +328,175 @@ export class GeminiDecisionClassifier {
 
     const json = (await res.json()) as {
       answers?: {
-        route?: { choice?: string; confidence?: number };
+        error_risk?: { noul?: number; confidence?: number };
+        needs_reasoning?: { noul?: number; confidence?: number };
+        difficulty?: { score?: number; confidence?: number };
+        user_is_correcting?: { noul?: number; confidence?: number };
         self_answer?: { choice?: string; confidence?: number };
+        route?: { choice?: string; confidence?: number };
       };
     };
 
-    const routeAns = json.answers?.route;
-    if (!routeAns?.choice) return null;
+    const answers = json.answers;
+    if (!answers) return null;
 
-    let chosenTier = routeAns.choice.toLowerCase() as RoutingTier;
-    if (!VALID_TIERS.has(chosenTier)) return null;
+    // Legacy single-choice mock compatibility
+    if (!answers.error_risk && answers.route?.choice) {
+      let legacyTier = answers.route.choice.toLowerCase() as RoutingTier;
+      if (!VALID_TIERS.has(legacyTier)) return null;
+      const routeConf = Math.min(1, Math.max(0, Number(answers.route.confidence ?? 0.8)));
 
-    const routeConf = Math.min(1, Math.max(0, Number(routeAns.confidence ?? 0.8)));
-
-    if (chosenTier === "self") {
-      const selfAns = json.answers?.self_answer;
-      const selfConf = Number(selfAns?.confidence ?? 0);
-      if (discreteChoice && selfAns?.choice && selfConf >= 0.5) {
-        const formatted = discreteChoice.useFinalPrefix
-          ? `FINAL: ${selfAns.choice}`
-          : selfAns.choice;
-        return {
-          tier: "self",
-          confidence: routeConf,
-          reason: `self (${Math.round(routeConf * 100)}%, ans=${selfAns.choice}@${Math.round(selfConf * 100)}%)`,
-          classifierModel: modelEntry.id,
-          directAnswer: formatted,
-        };
+      if (legacyTier === "self") {
+        const selfAns = answers.self_answer;
+        const selfConf = Number(selfAns?.confidence ?? 0);
+        if (discreteChoice && selfAns?.choice && selfConf >= 0.5) {
+          const formatted = discreteChoice.useFinalPrefix
+            ? `FINAL: ${selfAns.choice}`
+            : selfAns.choice;
+          return {
+            tier: "self",
+            confidence: routeConf,
+            reason: `self (${Math.round(routeConf * 100)}%, ans=${selfAns.choice}@${Math.round(selfConf * 100)}%)`,
+            classifierModel: modelEntry.id,
+            directAnswer: formatted,
+          };
+        }
+        legacyTier = "trivial";
       }
-      chosenTier = "trivial";
+
+      return {
+        tier: legacyTier,
+        confidence: routeConf,
+        reason: `${legacyTier} (${Math.round(routeConf * 100)}%)`,
+        classifierModel: modelEntry.id,
+      };
     }
 
+    // Multi-probe calibrated scoring
+    const errorRisk = Number(answers.error_risk?.noul ?? 0.5);
+    const needsReasoning = Number(answers.needs_reasoning?.noul ?? 0.5);
+    const difficultyScore = Number(answers.difficulty?.score ?? 2.0);
+    const userIsCorrecting =
+      answers.user_is_correcting?.noul !== undefined
+        ? Number(answers.user_is_correcting.noul)
+        : undefined;
+
+    const riskScore = Number(
+      (
+        0.4 * errorRisk +
+        0.35 * needsReasoning +
+        0.25 * Math.min(1, Math.max(0, difficultyScore / 4))
+      ).toFixed(4),
+    );
+
+    const selfAns = answers.self_answer;
+    const selfConf =
+      selfAns?.confidence !== undefined ? Number(selfAns.confidence) : undefined;
+    const directAnswer =
+      discreteChoice && selfAns?.choice
+        ? discreteChoice.useFinalPrefix
+          ? `FINAL: ${selfAns.choice}`
+          : selfAns.choice
+        : undefined;
+
+    const preliminaryTier: RoutingTier =
+      riskScore >= 0.78
+        ? "frontier"
+        : riskScore >= 0.32
+          ? "complex"
+          : riskScore >= 0.18
+            ? "standard"
+            : "trivial";
+
     return {
-      tier: chosenTier,
-      confidence: routeConf,
-      reason: `${chosenTier} (${Math.round(routeConf * 100)}%)`,
+      tier: preliminaryTier,
+      confidence: Math.min(1, Math.max(0, 1 - Math.abs(riskScore - 0.5))),
+      reason: `risk=${riskScore.toFixed(2)} (err=${errorRisk.toFixed(2)}, reas=${needsReasoning.toFixed(2)}, diff=${difficultyScore.toFixed(1)})`,
       classifierModel: modelEntry.id,
+      riskScore,
+      signals: {
+        errorRisk,
+        needsReasoning,
+        difficultyScore,
+        riskScore,
+        ...(userIsCorrecting !== undefined ? { userIsCorrecting } : {}),
+        ...(selfConf !== undefined ? { selfAnswerConfidence: selfConf } : {}),
+      },
+      ...(directAnswer !== undefined ? { directAnswer } : {}),
     };
+  }
+
+  /**
+   * Optional post-response sanity verification on a non-streaming draft answer
+   * using a single zero-output-token `noul` probe on `gemini-decision-1`.
+   */
+  async verifyDraftAnswer(
+    prompt: string,
+    draftAnswer: string,
+    config: DecisionModelConfig,
+  ): Promise<{ looksWrongProb: number } | null> {
+    if (config.apiKeys.length === 0 || config.models.length === 0) {
+      return null;
+    }
+
+    const nowMs = Date.now();
+    for (const modelEntry of config.models) {
+      const apiMode =
+        modelEntry.api ??
+        (modelEntry.id.includes("decision") ? "decisions" : "generateContent");
+      if (apiMode !== "decisions") continue;
+
+      for (let keyIdx = 0; keyIdx < config.apiKeys.length; keyIdx++) {
+        const apiKey = config.apiKeys[keyIdx];
+        if (!apiKey) continue;
+        const bucket = this.getBucket(modelEntry.id, keyIdx, nowMs);
+        if (!this.canUseBucket(bucket, keyIdx, modelEntry.rpm, modelEntry.rpd)) {
+          continue;
+        }
+        bucket.minuteTimestamps.push(nowMs);
+        bucket.dayCount += 1;
+
+        try {
+          const url = joinUrl(config.baseUrl, "/decisions");
+          const res = await fetch(url, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-goog-api-key": apiKey,
+            },
+            body: JSON.stringify({
+              model: `models/${modelEntry.id}`,
+              input: `PROMPT:\n${prompt.slice(0, 1200)}\n\nDRAFT_ANSWER:\n${draftAnswer.slice(0, 800)}`,
+              questions: {
+                answer_looks_wrong: {
+                  type: "noul",
+                  instructions:
+                    "Does DRAFT_ANSWER appear incorrect, incomplete, contradictory, or fall for an obvious trick given PROMPT?",
+                },
+              },
+            }),
+            signal: AbortSignal.timeout(config.timeoutMs),
+          });
+          if (!res.ok) {
+            const errBody = await res.text().catch(() => "");
+            if (isAuthErrorResponse(res.status, errBody)) {
+              this.quarantineKey(keyIdx, res.status);
+            }
+            continue;
+          }
+          const json = (await res.json()) as {
+            answers?: { answer_looks_wrong?: { noul?: number } };
+          };
+          const p = json.answers?.answer_looks_wrong?.noul;
+          if (typeof p === "number") {
+            return { looksWrongProb: p };
+          }
+        } catch {
+          continue;
+        }
+      }
+    }
+    return null;
   }
 
   async classify(

@@ -104,6 +104,9 @@ pnpm bench:text:live --limit 10 --light gemini/gemini-2.5-flash-lite --smart ant
 pnpm bench:industry
 pnpm bench:industry:live-decision
 pnpm bench:industry:live
+
+# v2 Pareto Threshold Calibration (84-task sweep + 21-task unseen held-out validation + structural audit)
+pnpm bench:pareto
 ```
 
 See [BENCHMARK_REPORT.md](BENCHMARK_REPORT.md) for the latest benchmark results.

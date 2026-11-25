@@ -8,6 +8,10 @@ export interface SessionState {
   lastProvider: string;
   lastModel: string;
   lastTier: RoutingTier;
+  peakTaskTier: RoutingTier;
+  escalationFloorTier?: BaseTier;
+  escalationFloorTurnsLeft: number;
+  consecutiveCleanToolSteps: number;
   lastUpdatedAt: number;
   estimatedCachedTokens: number;
 }
@@ -25,6 +29,10 @@ export function tierRank(tier: RoutingTier): number {
   return TIER_RANK[tier];
 }
 
+export function maxTierByRank(a: RoutingTier, b: RoutingTier): RoutingTier {
+  return tierRank(a) >= tierRank(b) ? a : b;
+}
+
 export class SessionStore {
   private readonly sessions = new Map<string, SessionState>();
 
@@ -37,7 +45,6 @@ export class SessionStore {
       this.sessions.delete(sessionId);
       return undefined;
     }
-    // Refresh LRU order
     this.sessions.delete(sessionId);
     this.sessions.set(sessionId, entry);
     return entry;
@@ -84,7 +91,6 @@ export function shouldStayCacheSticky(
     return { staySticky: false, reason: "session cache expired" };
   }
 
-  // Only consider stickiness when we would otherwise downgrade (or stay equal)
   if (tierRank(candidateTier) > tierRank(session.lastTier)) {
     return { staySticky: false, reason: "upgrading tier" };
   }
@@ -127,7 +133,6 @@ export function shouldStayCacheSticky(
     (features.estimatedTotalTokens / 1_000_000) * candidatePricing.inputPer1M +
     (assumedOutputTokens / 1_000_000) * candidatePricing.outputPer1M;
 
-  // Stay sticky if switching would not save at least 5%
   if (switchCost >= stickyCost * 0.95) {
     return {
       staySticky: true,

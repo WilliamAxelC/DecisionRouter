@@ -237,7 +237,7 @@ describe("Gemini free-tier decision waterfall & circuit breaker", () => {
     const engine = new DecisionEngine(config);
     const req = parseOpenAIRequest({
       model: "auto",
-      messages: [{ role: "user", content: "hi" }],
+      messages: [{ role: "user", content: 'Format JSON: {"a":1}' }],
     });
     const plan = await engine.decide(req);
     expect(plan.decision.source).toBe("heuristic");
@@ -659,5 +659,213 @@ describe("Inline self-answering tier ('self')", () => {
     const status = engine.classifier.getQuotaStatus(config.decisionModel);
     expect(status.find((s) => s.keyIndex === 0)?.disabled).toBe(true);
     expect(status.find((s) => s.keyIndex === 1)?.disabled).toBe(false);
+  });
+});
+
+describe("DecisionRouter v2 multi-probe, smart escalation, inertia & cascade retry", () => {
+  it("dual-gates 'self' tier using multi-probe riskScore + self_answer confidence", async () => {
+    let scenario: "safe_self" | "risky_self" = "safe_self";
+    const classifierUrl = await startHttpServer((_req, _bodyStr, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      if (scenario === "safe_self") {
+        res.end(
+          JSON.stringify({
+            answers: {
+              error_risk: { noul: 0.1, type: "noul" },
+              needs_reasoning: { noul: 0.08, type: "noul" },
+              difficulty: { score: 0.5, type: "score" },
+              self_answer: { choice: "NEGATIVE", confidence: 0.94, type: "choice" },
+            },
+          }),
+        );
+      } else {
+        // High self_answer confidence, but riskScore is high (> selfMaxRisk) -> reject self & route complex
+        res.end(
+          JSON.stringify({
+            answers: {
+              error_risk: { noul: 0.65, type: "noul" },
+              needs_reasoning: { noul: 0.70, type: "noul" },
+              difficulty: { score: 2.8, type: "score" },
+              self_answer: { choice: "VALID", confidence: 0.91, type: "choice" },
+            },
+          }),
+        );
+      }
+    });
+
+    const config = RouterConfigSchema.parse({
+      decisionModel: {
+        baseUrl: classifierUrl,
+        timeoutMs: 2000,
+        cacheTtlSec: 0,
+        allowSelfAnswer: true,
+        apiKeys: ["key-1"],
+        models: [{ id: "gemini-decision-1", api: "decisions", rpm: 200, rpd: 10000 }],
+      },
+      providers: {
+        gemini: { type: "gemini", baseUrl: "http://localhost:1", models: {} },
+      },
+      tiers: {
+        trivial: [{ provider: "gemini", model: "gemini-3.8-flash" }],
+        complex: [{ provider: "gemini", model: "gemini-4-hydrogen" }],
+      },
+    });
+
+    const engine = new DecisionEngine(config);
+
+    const p1 = await engine.decide(
+      parseOpenAIRequest({
+        model: "auto",
+        messages: [{ role: "user", content: "Sentiment (POSITIVE or NEGATIVE): broken!" }],
+      }),
+    );
+    expect(p1.decision.tier).toBe("self");
+    expect(p1.decision.selfHandled).toBe(true);
+    expect(p1.decision.selfAnswer).toBe("NEGATIVE");
+
+    scenario = "risky_self";
+    const p2 = await engine.decide(
+      parseOpenAIRequest({
+        model: "auto",
+        messages: [{ role: "user", content: "Is this logic VALID or INVALID?" }],
+      }),
+    );
+    expect(p2.decision.selfHandled).toBe(false);
+    expect(p2.decision.tier).toBe("complex");
+    expect(p2.decision.selectedModel).toBe("gemini-4-hydrogen");
+  });
+
+  it("escalates on subtle pushback noul probe, locks floor for 2 turns, detects edit-fail oscillation & context inertia, and cascade-retries malformed JSON", async () => {
+    let userCorrectingProb = 0.05;
+    let riskOverride = 0.1;
+
+    const classifierUrl = await startHttpServer((_req, _bodyStr, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          answers: {
+            error_risk: { noul: riskOverride, type: "noul" },
+            needs_reasoning: { noul: riskOverride, type: "noul" },
+            difficulty: { score: riskOverride * 4, type: "score" },
+            user_is_correcting: { noul: userCorrectingProb, type: "noul" },
+          },
+        }),
+      );
+    });
+
+    let upstreamCalls = 0;
+    const upstreamUrl = await startHttpServer((_req, bodyStr, res) => {
+      upstreamCalls += 1;
+      const body = JSON.parse(bodyStr) as { model?: string };
+      res.writeHead(200, { "content-type": "application/json" });
+      // Light model outputs malformed JSON; complex model outputs valid JSON
+      const content =
+        body.model === "gpt-light"
+          ? "Sorry, here is broken json {not_valid"
+          : '{"eligible":false,"reason_code":"EXPIRED"}';
+      res.end(
+        JSON.stringify({
+          id: `cmpl_${upstreamCalls}`,
+          model: body.model,
+          choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 20, completion_tokens: 10 },
+        }),
+      );
+    });
+
+    const config = RouterConfigSchema.parse({
+      decisionModel: {
+        baseUrl: classifierUrl,
+        timeoutMs: 2000,
+        cacheTtlSec: 0,
+        apiKeys: ["key-1"],
+        models: [{ id: "gemini-decision-1", api: "decisions", rpm: 200, rpd: 10000 }],
+      },
+      providers: {
+        openai: { type: "openai", baseUrl: upstreamUrl, apiKey: "oa", models: {} },
+      },
+      tiers: {
+        trivial: [{ provider: "openai", model: "gpt-light" }],
+        standard: [{ provider: "openai", model: "gpt-light" }],
+        complex: [{ provider: "openai", model: "gpt-smart" }],
+        frontier: [{ provider: "openai", model: "gpt-smart" }],
+      },
+    });
+
+    const engine = new DecisionEngine(config);
+
+    // 1. Subtle pushback ("hmm wait, check that again") -> escalates to complex & sets sticky lock (2 turns)
+    userCorrectingProb = 0.85;
+    const out1 = await engine.execute(
+      parseOpenAIRequest({
+        model: "auto",
+        messages: [
+          { role: "user", content: "Compute total" },
+          { role: "assistant", content: "10" },
+          { role: "user", content: "Hmm wait, check that math one more time carefully." },
+        ],
+      }),
+      // explicit session via headers below
+    );
+    expect(out1.decision.escalated).toBe(true);
+    expect(out1.decision.tier).toBe("complex");
+
+    // 2. Sticky escalation lock + context inertia keep follow-up elevated even when risk drops
+    userCorrectingProb = 0.05;
+    const out2 = await engine.execute(
+      parseOpenAIRequest(
+        {
+          model: "auto",
+          messages: [
+            { role: "user", content: "Fix auth race condition" },
+            { role: "assistant", content: "Fixed" },
+            { role: "user", content: "ok do the same for billing" },
+          ],
+        },
+        { "x-router-session": out1.decision.sessionId },
+      ),
+    );
+    expect(out2.decision.tier).toBe("complex");
+
+    // 3. Fuzzy edit-fail oscillation (same file edited twice with different args + error) triggers escalation
+    const oscPlan = await engine.decide(
+      parseOpenAIRequest({
+        model: "auto",
+        messages: [
+          { role: "user", content: "Fix lock.ts" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              { id: "c1", type: "function", function: { name: "edit_file", arguments: '{"path":"lock.ts","replacement":"v1"}' } },
+            ],
+          },
+          { role: "tool", tool_call_id: "c1", content: "Error: test failed" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              { id: "c2", type: "function", function: { name: "edit_file", arguments: '{"path":"lock.ts","replacement":"v2"}' } },
+            ],
+          },
+          { role: "tool", tool_call_id: "c2", content: "ok" },
+        ],
+      }),
+    );
+    expect(oscPlan.features.editFailOscillation).toBe(true);
+    expect(oscPlan.decision.escalated).toBe(true);
+    expect(oscPlan.decision.tier).toBe("complex");
+
+    // 4. Non-streaming structural cascade retry: Light returns invalid JSON -> auto-escalates to gpt-smart
+    riskOverride = 0.05;
+    const cascadeOut = await engine.execute(
+      parseOpenAIRequest({
+        model: "auto",
+        messages: [{ role: "user", content: "Return ONLY JSON for policy eligibility." }],
+      }),
+    );
+    expect(cascadeOut.decision.cascadeRetried).toBe(true);
+    expect(cascadeOut.decision.escalated).toBe(true);
+    expect(cascadeOut.decision.selectedModel).toBe("gpt-smart");
   });
 });

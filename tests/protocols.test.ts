@@ -224,6 +224,55 @@ describe("Cross-protocol translation", () => {
     expect(oaMsg.content).toBe("FINAL: 130");
   });
 
+  it("sanitizes messy MCP JSON Schemas for Gemini and preserves Anthropic cache_control system blocks", () => {
+    const mcpReq = parseOpenAIRequest({
+      model: "auto",
+      messages: [{ role: "user", content: "Search issues" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "mcp_search",
+            parameters: {
+              $schema: "http://json-schema.org/draft-07/schema#",
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                query: { type: "string", default: "all" },
+                assignee: { anyOf: [{ type: "string" }, { type: "null" }] },
+                meta: { type: "object", properties: {} },
+              },
+              required: ["query"],
+            },
+          },
+        },
+      ],
+    });
+
+    const gemBody = toGeminiRequestBody(mcpReq);
+    const gemStr = JSON.stringify(gemBody.tools);
+    expect(gemStr).not.toContain("$schema");
+    expect(gemStr).not.toContain("additionalProperties");
+    expect(gemStr).not.toContain("anyOf");
+    expect(gemStr).toContain('"nullable":true');
+
+    const antReq = parseAnthropicRequest({
+      model: "auto",
+      max_tokens: 512,
+      system: [
+        {
+          type: "text",
+          text: "Large cached repository context",
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+      messages: [{ role: "user", content: "Hi" }],
+    });
+    const antBody = toAnthropicRequestBody(antReq, "claude-sonnet-4-6");
+    expect(Array.isArray(antBody.system)).toBe(true);
+    expect(JSON.stringify(antBody.system)).toContain('"cache_control":{"type":"ephemeral"}');
+  });
+
   it("emits valid Anthropic SSE lifecycle and OpenAI SSE chunks from CanonicalStreamEvents", async () => {
     async function* mockEvents(): AsyncGenerator<CanonicalStreamEvent> {
       yield { type: "message_start", id: "msg_1", model: "test", inputTokens: 100 };

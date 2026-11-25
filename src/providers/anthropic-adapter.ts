@@ -101,7 +101,15 @@ export function toAnthropicRequestBody(
     stream: req.stream,
   };
 
-  if (req.system) body.system = req.system;
+  if (req.systemBlocks && req.systemBlocks.length > 0) {
+    body.system = req.systemBlocks.map((b) => ({
+      type: "text",
+      text: b.text,
+      ...(b.cacheControl ? { cache_control: b.cacheControl } : {}),
+    }));
+  } else if (req.system) {
+    body.system = req.system;
+  }
   if (req.temperature !== undefined) body.temperature = req.temperature;
   if (req.topP !== undefined) body.top_p = req.topP;
   if (req.stopSequences && req.stopSequences.length > 0) {

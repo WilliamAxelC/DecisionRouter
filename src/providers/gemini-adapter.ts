@@ -30,6 +30,78 @@ function mapGeminiFinishReason(
   }
 }
 
+const GEMINI_STRIPPED_SCHEMA_KEYS = new Set([
+  "$schema",
+  "$id",
+  "$defs",
+  "definitions",
+  "additionalProperties",
+  "default",
+  "examples",
+  "title",
+]);
+
+/**
+ * Recursively strips JSON Schema keywords rejected by Gemini's OpenAPI-subset
+ * `functionDeclarations.parameters` validator and flattens nullable `anyOf`/`oneOf`.
+ */
+export function sanitizeSchemaForGemini(schema: unknown): Record<string, unknown> {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return { type: "object" };
+  }
+
+  const raw = schema as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+
+  for (const [key, val] of Object.entries(raw)) {
+    if (GEMINI_STRIPPED_SCHEMA_KEYS.has(key)) continue;
+
+    if ((key === "anyOf" || key === "oneOf") && Array.isArray(val)) {
+      const branches = val.filter(
+        (b): b is Record<string, unknown> => Boolean(b && typeof b === "object"),
+      );
+      const nonNull = branches.filter((b) => b.type !== "null");
+      const hasNull = branches.some((b) => b.type === "null");
+      if (nonNull.length > 0) {
+        const sanitized = sanitizeSchemaForGemini(nonNull[0]);
+        Object.assign(out, sanitized);
+        if (hasNull) out.nullable = true;
+      }
+      continue;
+    }
+
+    if (key === "properties" && val && typeof val === "object" && !Array.isArray(val)) {
+      const propEntries = Object.entries(val as Record<string, unknown>);
+      if (propEntries.length === 0) {
+        // Gemini rejects empty properties: {} on OBJECT schemas
+        continue;
+      }
+      const cleanedProps: Record<string, unknown> = {};
+      for (const [pk, pv] of propEntries) {
+        cleanedProps[pk] = sanitizeSchemaForGemini(pv);
+      }
+      out.properties = cleanedProps;
+      continue;
+    }
+
+    if (key === "items") {
+      out.items = sanitizeSchemaForGemini(val);
+      continue;
+    }
+
+    out[key] = val;
+  }
+
+  if (Array.isArray(out.type)) {
+    const types = (out.type as unknown[]).map(String);
+    const nonNull = types.filter((t) => t !== "null");
+    out.type = nonNull[0] ?? "string";
+    if (types.includes("null")) out.nullable = true;
+  }
+
+  return out;
+}
+
 export function toGeminiRequestBody(
   req: CanonicalRequest,
 ): Record<string, unknown> {
@@ -136,7 +208,7 @@ export function toGeminiRequestBody(
         functionDeclarations: req.tools.map((t) => ({
           name: t.name,
           ...(t.description ? { description: t.description } : {}),
-          parameters: t.inputSchema,
+          parameters: sanitizeSchemaForGemini(t.inputSchema),
         })),
       },
     ];

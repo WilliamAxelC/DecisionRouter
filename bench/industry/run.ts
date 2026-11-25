@@ -489,6 +489,8 @@ export async function runIndustryBenchmark(opts?: {
   configPath?: string;
   lightModel?: string;
   smartModel?: string;
+  profile?: string;
+  tasks?: IndustryTask[];
   sample?: number;
   maxWaitSec?: number;
   maxAttempts?: number;
@@ -498,10 +500,12 @@ export async function runIndustryBenchmark(opts?: {
 }): Promise<IndustryBenchmarkReport> {
   const mode: IndustryBenchMode = opts?.mode ?? "simulated";
   const saveArtifacts = opts?.saveArtifacts ?? true;
+  const baseTasks = opts?.tasks ?? INDUSTRY_TASKS;
   const tasks =
     opts?.sample && opts.sample > 0
-      ? selectStratifiedSample(INDUSTRY_TASKS, opts.sample)
-      : INDUSTRY_TASKS;
+      ? selectStratifiedSample(baseTasks, opts.sample)
+      : baseTasks;
+  const routerProfile = opts?.profile ?? "auto";
 
   let config: RouterConfig;
   let closeMocks: (() => Promise<void>) | null = null;
@@ -529,7 +533,7 @@ export async function runIndustryBenchmark(opts?: {
       cacheTtlSec: 0,
       timeoutMs: Math.max(loaded.config.decisionModel.timeoutMs, 5000),
     };
-    config = buildIndustrySimConfig(mocks, liveDm);
+    config = buildIndustrySimConfig(mocks, liveDm, loaded.config.profiles);
     lightRef = opts?.lightModel ?? "gemini/gemini-3.8-flash";
     smartRef = opts?.smartModel ?? "smart/gemini-4-hydrogen";
   } else {
@@ -597,7 +601,7 @@ export async function runIndustryBenchmark(opts?: {
 
     const routerArm = await runQueuedArm({
       armName: "decision-router",
-      modelParam: "auto",
+      modelParam: routerProfile,
       modelBucket: "decision-router",
       tasks,
       config,
