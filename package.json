@@ -1,0 +1,42 @@
+{
+  "name": "decision-router",
+  "version": "0.1.0",
+  "description": "Local-first LLM model router HTTP proxy powered by Gemini free-tier decision classification, cache-aware switching, and cross-protocol translation",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "decision-router": "./dist/cli.js"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts start",
+    "build": "tsc",
+    "start": "node dist/cli.js start",
+    "cli": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.bench.json",
+    "test": "vitest run",
+    "bench": "tsx bench/run.ts",
+    "bench:heuristic": "tsx bench/run.ts --mode heuristic",
+    "bench:live": "tsx bench/run.ts --mode live-classifier",
+    "bench:text": "tsx bench/text-eval/run.ts",
+    "bench:text:live": "tsx bench/text-eval/run.ts --mode live",
+    "bench:industry": "tsx bench/industry/run.ts",
+    "bench:industry:live-decision": "tsx bench/industry/run.ts --mode live-decision --config config.yaml",
+    "bench:industry:live": "tsx bench/industry/run.ts --mode live --config config.yaml --sample 6"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "dotenv": "^16.4.7",
+    "hono": "^4.7.4",
+    "yaml": "^2.7.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.8"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

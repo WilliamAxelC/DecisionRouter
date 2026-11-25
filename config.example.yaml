@@ -1,0 +1,283 @@
+# DecisionRouter configuration template
+# Copy to config.yaml or run with --config config.example.yaml
+
+server:
+  host: "127.0.0.1"
+  port: 4000
+  # Leave empty for unauthenticated localhost access, or set ROUTER_AUTH_TOKEN
+  authToken: "${ROUTER_AUTH_TOKEN:-}"
+  dbPath: "./data/router.db"
+  dashboardEnabled: true
+
+decisionModel:
+  provider: "gemini"
+  baseUrl: "https://generativelanguage.googleapis.com/v1beta"
+  timeoutMs: 600
+  maxContextChars: 1800
+  cacheTtlSec: 60
+  # Allow the free decision model to answer pure decision/triage/classification tasks directly (tier: "self")
+  allowSelfAnswer: true
+  selfAnswerMaxInputTokens: 1500
+  # Add multiple keys to expand free-tier RPM/RPD via automatic waterfall rotation
+  apiKeys:
+    - "${GEMINI_API_KEY:-}"
+    - "${GEMINI_API_KEY_2:-}"
+  models:
+    # Option A: Google's specialized zero-output-token Decisions API model (recommended if enabled on your key)
+    # - id: "gemini-decision-1"
+    #   api: "decisions"
+    #   rpm: 200
+    #   tpm: 50000
+    #   rpd: 10000
+    - id: "gemini-2.5-flash-lite"
+      api: "generateContent"
+      rpm: 15
+      rpd: 1000
+    - id: "gemini-2.5-flash"
+      api: "generateContent"
+      rpm: 10
+      rpd: 250
+
+providers:
+  anthropic:
+    type: "anthropic"
+    baseUrl: "https://api.anthropic.com/v1"
+    apiKey: "${ANTHROPIC_API_KEY:-}"
+    timeoutMs: 60000
+    models:
+      claude-haiku-4-5:
+        contextWindow: 200000
+        supportsVision: true
+        supportsTools: true
+        inputPer1M: 1.0
+        cachedInputPer1M: 0.1
+        outputPer1M: 5.0
+      claude-sonnet-4-6:
+        contextWindow: 200000
+        supportsVision: true
+        supportsTools: true
+        inputPer1M: 3.0
+        cachedInputPer1M: 0.3
+        outputPer1M: 15.0
+      claude-opus-4-6:
+        contextWindow: 200000
+        supportsVision: true
+        supportsTools: true
+        inputPer1M: 15.0
+        cachedInputPer1M: 1.5
+        outputPer1M: 75.0
+
+  openai:
+    type: "openai"
+    baseUrl: "https://api.openai.com/v1"
+    apiKey: "${OPENAI_API_KEY:-}"
+    timeoutMs: 60000
+    models:
+      gpt-4.1-mini:
+        contextWindow: 1047576
+        supportsVision: true
+        supportsTools: true
+        inputPer1M: 0.4
+        cachedInputPer1M: 0.1
+        outputPer1M: 1.6
+      gpt-4.1:
+        contextWindow: 1047576
+        supportsVision: true
+        supportsTools: true
+        inputPer1M: 2.0
+        cachedInputPer1M: 0.5
+        outputPer1M: 8.0
+      o4-mini:
+        contextWindow: 200000
+        supportsVision: true
+        supportsTools: true
+        inputPer1M: 1.1
+        cachedInputPer1M: 0.275
+        outputPer1M: 4.4
+
+  gemini:
+    type: "gemini"
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta"
+    apiKey: "${GEMINI_API_KEY:-}"
+    timeoutMs: 60000
+    models:
+      gemini-2.5-flash-lite:
+        contextWindow: 1000000
+        supportsVision: true
+        supportsTools: true
+        inputPer1M: 0.1
+        cachedInputPer1M: 0.025
+        outputPer1M: 0.4
+      gemini-2.5-flash:
+        contextWindow: 1000000
+        supportsVision: true
+        supportsTools: true
+        inputPer1M: 0.3
+        cachedInputPer1M: 0.075
+        outputPer1M: 2.5
+      gemini-2.5-pro:
+        contextWindow: 1000000
+        supportsVision: true
+        supportsTools: true
+        inputPer1M: 1.25
+        cachedInputPer1M: 0.31
+        outputPer1M: 10.0
+      # gemini-3.8-flash:
+      #   contextWindow: 1048576
+      #   supportsVision: true
+      #   supportsTools: true
+      #   rpm: 5
+      #   tpm: 250000
+      #   rpd: 20
+      #   inputPer1M: 0.3
+      #   cachedInputPer1M: 0.075
+      #   outputPer1M: 2.5
+      # gemini-4-hydrogen:
+      #   contextWindow: 1048576
+      #   supportsVision: true
+      #   supportsTools: true
+      #   rpm: 5
+      #   tpm: 250000
+      #   rpd: 20
+      #   inputPer1M: 3.0
+      #   cachedInputPer1M: 0.75
+      #   outputPer1M: 15.0
+
+  ollama:
+    type: "openai"
+    baseUrl: "http://127.0.0.1:11434/v1"
+    apiKey: "ollama"
+    timeoutMs: 120000
+    models:
+      qwen2.5-coder:7b:
+        contextWindow: 32768
+        supportsVision: false
+        supportsTools: true
+        inputPer1M: 0.0
+        cachedInputPer1M: 0.0
+        outputPer1M: 0.0
+
+  # Example custom OpenAI-compatible provider:
+  # deepseek:
+  #   type: "openai"
+  #   baseUrl: "https://api.deepseek.com/v1"
+  #   apiKey: "${DEEPSEEK_API_KEY:-}"
+  #   models:
+  #     deepseek-chat:
+  #       contextWindow: 128000
+  #       supportsVision: false
+  #       supportsTools: true
+  #       inputPer1M: 0.27
+  #       cachedInputPer1M: 0.07
+  #       outputPer1M: 1.1
+
+tiers:
+  trivial:
+    - provider: "gemini"
+      model: "gemini-2.5-flash-lite"
+    - provider: "openai"
+      model: "gpt-4.1-mini"
+    - provider: "anthropic"
+      model: "claude-haiku-4-5"
+    - provider: "ollama"
+      model: "qwen2.5-coder:7b"
+
+  standard:
+    - provider: "gemini"
+      model: "gemini-2.5-flash"
+    - provider: "anthropic"
+      model: "claude-haiku-4-5"
+    - provider: "openai"
+      model: "gpt-4.1-mini"
+
+  complex:
+    - provider: "anthropic"
+      model: "claude-sonnet-4-6"
+    - provider: "openai"
+      model: "gpt-4.1"
+    - provider: "gemini"
+      model: "gemini-2.5-pro"
+
+  frontier:
+    - provider: "anthropic"
+      model: "claude-opus-4-6"
+    - provider: "anthropic"
+      model: "claude-sonnet-4-6"
+    - provider: "gemini"
+      model: "gemini-2.5-pro"
+
+  specialists:
+    vision:
+      - provider: "gemini"
+        model: "gemini-2.5-flash"
+      - provider: "anthropic"
+        model: "claude-sonnet-4-6"
+      - provider: "openai"
+        model: "gpt-4.1"
+    long_context:
+      - provider: "gemini"
+        model: "gemini-2.5-pro"
+      - provider: "openai"
+        model: "gpt-4.1"
+    coding:
+      - provider: "anthropic"
+        model: "claude-sonnet-4-6"
+      - provider: "openai"
+        model: "gpt-4.1"
+      - provider: "gemini"
+        model: "gemini-2.5-pro"
+    reasoning:
+      - provider: "openai"
+        model: "o4-mini"
+      - provider: "gemini"
+        model: "gemini-2.5-pro"
+      - provider: "anthropic"
+        model: "claude-opus-4-6"
+
+profiles:
+  auto:
+    defaultTier: "standard"
+    minTier: "trivial"
+    maxTier: "frontier"
+    cacheStickyEnabled: true
+    cacheTtlSec: 300
+    escalationEnabled: true
+    baselineModel: "anthropic/claude-opus-4-6"
+
+  "auto:eco":
+    defaultTier: "trivial"
+    minTier: "trivial"
+    maxTier: "complex"
+    cacheStickyEnabled: true
+    cacheTtlSec: 300
+    escalationEnabled: true
+    baselineModel: "anthropic/claude-opus-4-6"
+
+  "auto:coding":
+    defaultTier: "standard"
+    minTier: "trivial"
+    maxTier: "frontier"
+    cacheStickyEnabled: true
+    cacheTtlSec: 300
+    escalationEnabled: true
+    baselineModel: "anthropic/claude-opus-4-6"
+
+  "auto:max":
+    defaultTier: "complex"
+    minTier: "complex"
+    maxTier: "frontier"
+    cacheStickyEnabled: true
+    cacheTtlSec: 300
+    escalationEnabled: true
+    baselineModel: "anthropic/claude-opus-4-6"
+
+# Optional rules to intercept hardcoded client model strings (e.g. Claude Code / Cursor)
+intercepts: []
+  # - pattern: "claude-*"
+  #   profile: "auto:coding"
+  # - pattern: "gpt-4*"
+  #   profile: "auto"
+
+circuitBreaker:
+  failureThreshold: 2
+  cooldownSec: 30
