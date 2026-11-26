@@ -22,7 +22,8 @@
     "bench:industry": "tsx bench/industry/run.ts",
     "bench:industry:live-decision": "tsx bench/industry/run.ts --mode live-decision --config config.yaml",
     "bench:industry:live": "tsx bench/industry/run.ts --mode live --config config.yaml --sample 6",
-    "bench:pareto": "tsx bench/industry/pareto.ts --config config.yaml"
+    "bench:pareto": "tsx bench/industry/pareto.ts --config config.yaml",
+    "bench:hard": "tsx bench/hard/run.ts --config config.yaml"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
