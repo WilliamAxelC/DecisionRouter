@@ -172,6 +172,8 @@ providers:
   #       outputPer1M: 1.1
 
 tiers:
+  # Candidates also accept an optional `thinkingLevel` for Gemini reasoning effort routing
+  # ("MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | "XHIGH"), e.g. routing LOW -> XHIGH on one model.
   trivial:
     - provider: "gemini"
       model: "gemini-2.5-flash-lite"

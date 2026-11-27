@@ -188,6 +188,9 @@ export function toGeminiRequestBody(
   if (req.stopSequences && req.stopSequences.length > 0) {
     generationConfig.stopSequences = req.stopSequences;
   }
+  if (req.thinkingLevel) {
+    generationConfig.thinkingConfig = { thinkingLevel: req.thinkingLevel };
+  }
   if (req.responseFormat) {
     if (req.responseFormat.type === "json_object") {
       generationConfig.responseMimeType = "application/json";

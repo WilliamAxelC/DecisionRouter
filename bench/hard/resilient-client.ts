@@ -8,7 +8,12 @@ import {
   extractDiscreteChoiceQuestion,
   type ClassifierDecision,
 } from "../../src/router/gemini-classifier.js";
-import type { CanonicalMessage, CanonicalRequest, RoutingTier } from "../../src/types/ir.js";
+import type {
+  CanonicalMessage,
+  CanonicalRequest,
+  RoutingTier,
+  ThinkingLevel,
+} from "../../src/types/ir.js";
 import type { HardBenchTask, HardBenchToolCall } from "./types.js";
 
 const DIFFICULTY_LEVELS: string[] = [
@@ -144,6 +149,7 @@ export function buildCanonicalRequestForTask(
   task: HardBenchTask,
   model: string,
   stream: boolean,
+  thinkingLevel?: ThinkingLevel,
 ): CanonicalRequest {
   const messages: CanonicalMessage[] = task.messages.map((m) => ({
     role: m.role,
@@ -162,6 +168,7 @@ export function buildCanonicalRequestForTask(
     })),
     maxTokens: 8192,
     temperature: 0,
+    ...(thinkingLevel ? { thinkingLevel } : {}),
     stream,
     headers: {},
   };
@@ -320,9 +327,9 @@ export class ResilientGeminiPool {
 
     const dailyCap = this.getDailyCapPerKey(model);
     if (slot.dayCalls >= dailyCap) {
-      // Wait up to 60m or until next UTC day
+      // Wait cleanly until next UTC midnight rollover for this bucket
       const tomorrowUtc = Date.parse(`${slot.dayKey}T00:00:00.000Z`) + 86_400_000;
-      readyAt = Math.max(readyAt, Math.min(tomorrowUtc, nowMs + 60 * 60_000));
+      readyAt = Math.max(readyAt, tomorrowUtc);
     }
 
     const globalCool = this.modelGlobalCooldown.get(model) ?? 0;
@@ -367,21 +374,22 @@ export class ResilientGeminiPool {
   }
 
   private markCallStarted(keyIdx: number, model: string, nowMs: number): void {
-    const slot = this.getSlot(keyIdx, model, nowMs);
+    this.getSlot(keyIdx, model, nowMs);
     this.db
       .prepare(
-        `UPDATE key_slot_state SET last_call_ms = ?, day_calls = ? WHERE key_idx = ? AND model = ?`,
+        `UPDATE key_slot_state SET last_call_ms = ? WHERE key_idx = ? AND model = ?`,
       )
-      .run(nowMs, slot.dayCalls + 1, keyIdx, model);
+      .run(nowMs, keyIdx, model);
   }
 
   markSuccess(keyIdx: number, model: string, latencyMs: number): void {
+    const slot = this.getSlot(keyIdx, model, Date.now());
     this.modelGlobalCooldown.delete(model);
     this.db
       .prepare(
-        `UPDATE key_slot_state SET consecutive_errors = 0, cooldown_until_ms = 0, last_error = NULL WHERE key_idx = ? AND model = ?`,
+        `UPDATE key_slot_state SET consecutive_errors = 0, cooldown_until_ms = 0, day_calls = ?, last_error = NULL WHERE key_idx = ? AND model = ?`,
       )
-      .run(keyIdx, model);
+      .run(slot.dayCalls + 1, keyIdx, model);
     this.recordEvent(model, keyIdx, "success_200", 200, `ok ${Math.round(latencyMs)}ms`);
   }
 
@@ -464,6 +472,7 @@ export class ResilientGeminiPool {
     model: string,
     task: HardBenchTask,
     timeoutMs = 180_000,
+    thinkingLevel?: ThinkingLevel,
   ): Promise<
     | { ok: true; keyIdx: number; output: LiveGenerationOutput }
     | { ok: false; keyIdx: number; status: number; errorMessage: string; transition: BackoffTransition }
@@ -489,7 +498,7 @@ export class ResilientGeminiPool {
     const keyIdx = next.keyIdx;
     const apiKey = this.getKeysForModel(model)[keyIdx];
     const url = `${this.baseUrl.replace(/\/+$/, "")}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
-    const canonicalReq = buildCanonicalRequestForTask(task, model, true);
+    const canonicalReq = buildCanonicalRequestForTask(task, model, true, thinkingLevel);
     const body = toGeminiRequestBody(canonicalReq);
 
     this.markCallStarted(keyIdx, model, nowMs);

@@ -90,10 +90,11 @@ function percentile(values: number[], p: number): number {
 
 function costForResponse(
   config: RouterConfig,
-  model: string,
+  modelLabel: string,
   res: LiveModelResponse,
 ): number {
-  const pricing = getModelPricing(config, "gemini", model);
+  const baseModel = modelLabel.split("@")[0];
+  const pricing = getModelPricing(config, "gemini", baseModel);
   return (
     (res.promptTokens * pricing.inputPer1M +
       (res.outputTokens + res.thinkingTokens) * pricing.outputPer1M) /

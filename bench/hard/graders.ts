@@ -151,8 +151,12 @@ export function gradeAime25(responseText: string, expectedAnswer: string): HardG
   return { passed: false, detail: `no integer found (expected ${expectedInt})` };
 }
 
+function stripSolutionTags(s: string): string {
+  return s.replace(/<\/?solution>/gi, "").trim();
+}
+
 function normalizeTokenText(s: string): string {
-  return s
+  return stripSolutionTags(s)
     .replace(/\*\*/g, "")
     .replace(/\\text\{([^}]*)\}/g, "$1")
     .replace(/\\frac\{([^}]*)\}\{([^}]*)\}/g, "$1/$2")
@@ -163,7 +167,7 @@ function normalizeTokenText(s: string): string {
 }
 
 function normalizeTupleCsv(s: string): string {
-  return s
+  return stripSolutionTags(s)
     .split(",")
     .map((p) => p.replace(/\*\*/g, "").trim().toLowerCase())
     .filter(Boolean)
@@ -181,6 +185,9 @@ export function gradeLiveBenchExact(
   const expCsv = normalizeTupleCsv(expectedAnswer);
 
   const candidates: string[] = [];
+  for (const m of trimmed.matchAll(/<solution>([\s\S]*?)<\/solution>/gi)) {
+    candidates.push(m[1].trim());
+  }
   const boxed = extractLastBoxed(trimmed);
   if (boxed) candidates.push(boxed);
 

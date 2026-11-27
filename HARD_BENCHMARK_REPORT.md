@@ -1,15 +1,15 @@
 # DecisionRouter v2 — Hard Real-World Live Benchmark Report
 
-- **Generated:** 2026-11-26T07:30:49.031Z
+- **Generated:** 2026-11-27T17:10:42.989Z
 - **Dataset Scope:** 80 real unsaturated tasks across 9 public benchmarks (`BigCodeBench-Hard`, `AIME 2025`, `LiveBench Reasoning/Math/Data`, `SimpleQA Verified`, `IFEval`, `BFCL v4`, `MultiChallenge`)
-- **Live Models:** Classifier `gemini-decision-1` (`POST /v1beta/decisions`) | Light `gemini-3.8-flash` | Smart `gemini-4-hydrogen`
+- **Live Models:** Classifier `gemini-decision-1` (`POST /v1beta/decisions`) | Light `gemini-4-hydrogen@LOW` | Smart `gemini-4-hydrogen@XHIGH`
 - **Live Completion Status:** Decision `80/80` | Light `0/80` | Smart `0/80` | **Paired Graded Pairs:** `0/80 (0.0%)`
 
 > **Waiting for first completed Light + Smart + Decision pair.** Runner is actively draining queued jobs cleanly across API backoffs/cooldowns.
 
 ## 2. Per-Benchmark Breakdown (9 Real Families)
 
-| Benchmark Family | Pairs Done | Light (`gemini-3.8-flash`) | Smart (`gemini-4-hydrogen`) | Oracle Ceiling | `auto:quality` | `auto:balanced` | `auto:eco` | Avg `riskScore` |
+| Benchmark Family | Pairs Done | Light (`gemini-4-hydrogen@LOW`) | Smart (`gemini-4-hydrogen@XHIGH`) | Oracle Ceiling | `auto:quality` | `auto:balanced` | `auto:eco` | Avg `riskScore` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `bigcodebench-hard` | 0/10 | 0% | **0%** | 0% | **0%** | 0% | 0% | 0.000 |
 | `aime25` | 0/8 | 0% | **0%** | 0% | **0%** | 0% | 0% | 0.000 |
@@ -25,4 +25,3 @@
 
 | Model | Total Calls | HTTP 200 | HTTP 429 | HTTP 503 | Other/Timeout | Quarantined Keys |
 | --- | --- | --- | --- | --- | --- | --- |
-| `gemini-decision-1` | 80 | 80 | 0 | 0 | 0 | 0 |

@@ -7,7 +7,7 @@ import { loadConfig } from "../../src/config/loader.js";
 import type { RouterConfig } from "../../src/config/schema.js";
 import { verifyResponseStructurally } from "../../src/router/cascade.js";
 import type { ClassifierDecision } from "../../src/router/gemini-classifier.js";
-import type { CanonicalResponse } from "../../src/types/ir.js";
+import type { CanonicalResponse, ThinkingLevel } from "../../src/types/ir.js";
 import { fetchHardBenchTasks } from "./fetch.js";
 import { gradeHardTaskResponse, type DecisionNoulJudgeFn } from "./graders.js";
 import {
@@ -36,16 +36,41 @@ interface CliOpts {
   notify: boolean;
   dbPath: string;
   reportPath: string;
+  lightModel?: string;
+  lightThinking?: ThinkingLevel;
+  highModel?: string;
+  highThinking?: ThinkingLevel;
+  seedDecisionsDb?: string;
+}
+
+function parseThinkingLevelArg(raw: string | undefined): ThinkingLevel | undefined {
+  if (!raw) return undefined;
+  const up = raw.trim().toUpperCase();
+  if (
+    up === "MINIMAL" ||
+    up === "LOW" ||
+    up === "MEDIUM" ||
+    up === "HIGH" ||
+    up === "XHIGH"
+  ) {
+    return up;
+  }
+  return undefined;
 }
 
 function parseCliArgs(argv: string[]): CliOpts {
   let configPath: string | undefined;
   let refresh = false;
   let statusOnly = false;
-  let maxHours = 48;
+  let maxHours = 72;
   let notify = false;
   let dbPath = "data/benchmarks/hard-suite/hard-bench.db";
   let reportPath = "HARD_BENCHMARK_REPORT.md";
+  let lightModel: string | undefined;
+  let lightThinking: ThinkingLevel | undefined;
+  let highModel: string | undefined;
+  let highThinking: ThinkingLevel | undefined;
+  let seedDecisionsDb: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -54,14 +79,91 @@ function parseCliArgs(argv: string[]): CliOpts {
     else if (a === "--status") statusOnly = true;
     else if (a === "--notify") notify = true;
     else if (a === "--max-hours" && argv[i + 1]) {
-      maxHours = Math.max(0.01, Number(argv[++i]) || 48);
+      maxHours = Math.max(0.01, Number(argv[++i]) || 72);
     } else if (a === "--db" && argv[i + 1]) {
       dbPath = argv[++i];
     } else if (a === "--report" && argv[i + 1]) {
       reportPath = argv[++i];
+    } else if (a === "--light-model" && argv[i + 1]) {
+      lightModel = argv[++i];
+    } else if (a === "--light-thinking" && argv[i + 1]) {
+      lightThinking = parseThinkingLevelArg(argv[++i]);
+    } else if (a === "--high-model" && argv[i + 1]) {
+      highModel = argv[++i];
+    } else if (a === "--high-thinking" && argv[i + 1]) {
+      highThinking = parseThinkingLevelArg(argv[++i]);
+    } else if (a === "--seed-decisions" && argv[i + 1]) {
+      seedDecisionsDb = argv[++i];
     }
   }
-  return { configPath, refresh, statusOnly, maxHours, notify, dbPath, reportPath };
+  return {
+    configPath,
+    refresh,
+    statusOnly,
+    maxHours,
+    notify,
+    dbPath,
+    reportPath,
+    lightModel,
+    lightThinking,
+    highModel,
+    highThinking,
+    seedDecisionsDb,
+  };
+}
+
+function stratifyRoundRobin(tasks: HardBenchTask[]): HardBenchTask[] {
+  const byFamily = new Map<string, HardBenchTask[]>();
+  for (const t of tasks) {
+    const list = byFamily.get(t.family) ?? [];
+    list.push(t);
+    byFamily.set(t.family, list);
+  }
+  const out: HardBenchTask[] = [];
+  const queues = [...byFamily.values()];
+  let idx = 0;
+  while (out.length < tasks.length) {
+    let pushed = false;
+    for (const q of queues) {
+      if (idx < q.length) {
+        out.push(q[idx]);
+        pushed = true;
+      }
+    }
+    if (!pushed) break;
+    idx++;
+  }
+  return out;
+}
+
+function seedDecisionsFromDb(targetDb: DatabaseSync, seedPath?: string): number {
+  if (!seedPath) return 0;
+  const abs = path.resolve(seedPath);
+  if (!fs.existsSync(abs)) return 0;
+  const srcDb = new DatabaseSync(abs, { readOnly: true });
+  try {
+    const rows = srcDb
+      .prepare(`SELECT task_id, classification_json, latency_ms, updated_at_ms FROM decision_cache`)
+      .all() as Array<Record<string, unknown>>;
+    const stmt = targetDb.prepare(
+      `INSERT OR IGNORE INTO decision_cache (task_id, classification_json, latency_ms, updated_at_ms) VALUES (?, ?, ?, ?)`,
+    );
+    let copied = 0;
+    for (const r of rows) {
+      const info = stmt.run(
+        String(r.task_id),
+        String(r.classification_json),
+        Number(r.latency_ms),
+        Number(r.updated_at_ms),
+      );
+      if (Number(info.changes ?? 0) > 0) copied++;
+    }
+    return copied;
+  } catch {
+    return 0;
+  } finally {
+    srcDb.close();
+  }
 }
 
 function initHardBenchSchema(db: DatabaseSync): void {
@@ -189,22 +291,43 @@ function loadCachedState(db: DatabaseSync): {
   return { decisions, lightResponses, highResponses, selfGrades, cascadeChecks };
 }
 
-function getTargetModels(config: RouterConfig): {
+function getTargetModels(
+  config: RouterConfig,
+  opts?: CliOpts,
+): {
   decisionModel: string;
   lightModel: string;
+  lightThinking?: ThinkingLevel;
   highModel: string;
+  highThinking?: ThinkingLevel;
+  lightLabel: string;
+  highLabel: string;
 } {
   const decisionModel =
     config.decisionModel.models[0]?.id ?? "gemini-decision-1";
-  const lightModel =
-    config.tiers.standard.find((c) => c.provider === "gemini")?.model ??
-    config.tiers.trivial.find((c) => c.provider === "gemini")?.model ??
-    "gemini-3.8-flash";
-  const highModel =
-    config.tiers.frontier.find((c) => c.provider === "gemini")?.model ??
-    config.tiers.complex.find((c) => c.provider === "gemini")?.model ??
-    "gemini-4-hydrogen";
-  return { decisionModel, lightModel, highModel };
+  const lightCand =
+    config.tiers.standard.find((c) => c.provider === "gemini") ??
+    config.tiers.trivial.find((c) => c.provider === "gemini");
+  const highCand =
+    config.tiers.frontier.find((c) => c.provider === "gemini") ??
+    config.tiers.complex.find((c) => c.provider === "gemini");
+
+  const lightModel = opts?.lightModel ?? lightCand?.model ?? "gemini-3.8-flash";
+  const lightThinking = opts?.lightThinking ?? lightCand?.thinkingLevel;
+  const highModel = opts?.highModel ?? highCand?.model ?? "gemini-4-hydrogen";
+  const highThinking = opts?.highThinking ?? highCand?.thinkingLevel;
+
+  const lightLabel = `${lightModel}${lightThinking ? `@${lightThinking}` : ""}`;
+  const highLabel = `${highModel}${highThinking ? `@${highThinking}` : ""}`;
+  return {
+    decisionModel,
+    lightModel,
+    lightThinking,
+    highModel,
+    highThinking,
+    lightLabel,
+    highLabel,
+  };
 }
 
 function flushReportFiles(
@@ -213,10 +336,11 @@ function flushReportFiles(
   config: RouterConfig,
   tasks: HardBenchTask[],
   reportPath: string,
+  opts?: CliOpts,
 ): HardBenchmarkReportData {
   const { decisions, lightResponses, highResponses, selfGrades, cascadeChecks } =
     loadCachedState(db);
-  const { decisionModel, lightModel, highModel } = getTargetModels(config);
+  const { decisionModel, lightLabel, highLabel } = getTargetModels(config, opts);
   const reportData = buildHardBenchmarkReportData({
     config,
     tasks,
@@ -226,8 +350,8 @@ function flushReportFiles(
     selfGrades,
     cascadeChecks,
     apiTelemetry: pool.getApiTelemetrySummary(),
-    lightModel,
-    highModel,
+    lightModel: lightLabel,
+    highModel: highLabel,
     decisionModel,
   });
 
@@ -249,7 +373,7 @@ function sendWorkerPing(reportData: HardBenchmarkReportData, status: "done" | "b
   const summary =
     `Completed ${reportData.pairedCompleted}/${reportData.totalTasks} live unsaturated benchmark tasks across 9 families. ` +
     (hArm && lArm && qArm
-      ? `Flash=${lArm.accuracyPct}%, Hydrogen=${hArm.accuracyPct}%, DecisionRouter(auto:quality)=${qArm.accuracyPct}% (regret=${qArm.regretCount}, speedup=${qArm.speedupVsHydrogen}x, saved=${qArm.costSavingsVsHydrogenPct}%). `
+      ? `${reportData.lightModel}=${lArm.accuracyPct}%, ${reportData.highModel}=${hArm.accuracyPct}%, DecisionRouter(auto:quality)=${qArm.accuracyPct}% (regret=${qArm.regretCount}, speedup=${qArm.speedupVsHydrogen}x, saved=${qArm.costSavingsVsHydrogenPct}%). `
       : "") +
     detail;
   try {
@@ -276,17 +400,34 @@ function sendWorkerPing(reportData: HardBenchmarkReportData, status: "done" | "b
 async function main(): Promise<void> {
   const opts = parseCliArgs(process.argv.slice(2));
   const { config } = loadConfig(opts.configPath);
-  const { decisionModel, lightModel, highModel } = getTargetModels(config);
+  const {
+    decisionModel,
+    lightModel,
+    lightThinking,
+    highModel,
+    highThinking,
+    lightLabel,
+    highLabel,
+  } = getTargetModels(config, opts);
 
   console.log(
-    `[HardBench] Hydrating real tasks from HuggingFace / Gorilla BFCL GitHub...`,
+    `[HardBench] Mode: Light=${lightLabel} vs Smart=${highLabel} (Classifier=${decisionModel})`,
   );
-  const tasks = await fetchHardBenchTasks({ refresh: opts.refresh });
-  console.log(`[HardBench] Loaded ${tasks.length} real tasks across 9 families.`);
+  const rawTasks = await fetchHardBenchTasks({ refresh: opts.refresh });
+  const tasks = stratifyRoundRobin(rawTasks);
+  console.log(
+    `[HardBench] Loaded ${tasks.length} real tasks interleaved round-robin across 9 families.`,
+  );
 
   fs.mkdirSync(path.dirname(path.resolve(opts.dbPath)), { recursive: true });
   const db = new DatabaseSync(opts.dbPath);
   initHardBenchSchema(db);
+  const seeded = seedDecisionsFromDb(db, opts.seedDecisionsDb);
+  if (seeded > 0) {
+    console.log(
+      `[HardBench] Seeded ${seeded} cached decision-1 classifications from ${opts.seedDecisionsDb}`,
+    );
+  }
   const pool = new ResilientGeminiPool(db, config);
 
   let stopRequested = false;
@@ -300,7 +441,7 @@ async function main(): Promise<void> {
   process.on("SIGTERM", handleSig);
 
   if (opts.statusOnly) {
-    const data = flushReportFiles(db, pool, config, tasks, opts.reportPath);
+    const data = flushReportFiles(db, pool, config, tasks, opts.reportPath, opts);
     console.log(
       `[HardBench Status] decision=${data.decisionCompleted}/${data.totalTasks} light=${data.lightCompleted}/${data.totalTasks} high=${data.highCompleted}/${data.totalTasks} paired=${data.pairedCompleted}/${data.totalTasks}`,
     );
@@ -403,6 +544,8 @@ async function main(): Promise<void> {
     type BucketWork = {
       kind: "decision" | "light" | "high";
       model: string;
+      thinkingLevel?: ThinkingLevel;
+      label: string;
       task: HardBenchTask;
       readyAtMs: number;
       allQuarantined: boolean;
@@ -414,6 +557,7 @@ async function main(): Promise<void> {
       candidateBuckets.push({
         kind: "decision",
         model: decisionModel,
+        label: decisionModel,
         task: pendingDecision[0],
         readyAtMs: r.readyAtMs,
         allQuarantined: r.allQuarantined,
@@ -424,6 +568,8 @@ async function main(): Promise<void> {
       candidateBuckets.push({
         kind: "light",
         model: lightModel,
+        thinkingLevel: lightThinking,
+        label: lightLabel,
         task: pendingLight[0],
         readyAtMs: r.readyAtMs,
         allQuarantined: r.allQuarantined,
@@ -434,6 +580,8 @@ async function main(): Promise<void> {
       candidateBuckets.push({
         kind: "high",
         model: highModel,
+        thinkingLevel: highThinking,
+        label: highLabel,
         task: pendingHigh[0],
         readyAtMs: r.readyAtMs,
         allQuarantined: r.allQuarantined,
@@ -443,7 +591,7 @@ async function main(): Promise<void> {
     if (candidateBuckets.every((b) => b.allQuarantined)) {
       console.error(`[HardBench] All keys permanently quarantined across remaining buckets; stopping.`);
       if (opts.notify) {
-        const finalData = flushReportFiles(db, pool, config, tasks, opts.reportPath);
+        const finalData = flushReportFiles(db, pool, config, tasks, opts.reportPath, opts);
         sendWorkerPing(finalData, "blocked", "All Gemini keys quarantined (401/403).");
       }
       break;
@@ -473,7 +621,7 @@ async function main(): Promise<void> {
       if (nowMs - lastWaitLogMs >= 20_000 || waitMs >= 10_000) {
         lastWaitLogMs = nowMs;
         console.log(
-          `[HardBench] progress dec=${state.decisions.size}/${tasks.length} light=${state.lightResponses.size}/${tasks.length} high=${state.highResponses.size}/${tasks.length} | backing off cleanly for ${Math.ceil(waitMs / 1000)}s (next=${chosen.model})`,
+          `[HardBench] progress dec=${state.decisions.size}/${tasks.length} light=${state.lightResponses.size}/${tasks.length} high=${state.highResponses.size}/${tasks.length} | backing off cleanly for ${Math.ceil(waitMs / 1000)}s (next=${chosen.label})`,
         );
       }
       await new Promise((r) => setTimeout(r, Math.max(100, Math.min(waitMs, 5000))));
@@ -501,7 +649,12 @@ async function main(): Promise<void> {
         );
       }
     } else {
-      const res = await pool.callGenerateContent(chosen.model, chosen.task);
+      const res = await pool.callGenerateContent(
+        chosen.model,
+        chosen.task,
+        180_000,
+        chosen.thinkingLevel,
+      );
       if (res.ok) {
         const graded = await gradeHardTaskResponse(
           chosen.task,
@@ -517,7 +670,7 @@ async function main(): Promise<void> {
         ).run(
           chosen.task.id,
           chosen.kind,
-          chosen.model,
+          chosen.label,
           JSON.stringify({
             text: res.output.text,
             thinkingText: res.output.thinkingText,
@@ -534,7 +687,7 @@ async function main(): Promise<void> {
           Date.now(),
         );
         console.log(
-          `[${chosen.kind}] ${chosen.task.id} key#${res.keyIdx + 1} ${graded.passed ? "PASS" : "FAIL"} (${res.output.latencyMs}ms, out=${res.output.outputTokens}, think=${res.output.thinkingTokens}) ${graded.detail.slice(0, 70)}`,
+          `[${chosen.kind}${chosen.thinkingLevel ? `:${chosen.thinkingLevel}` : ""}] ${chosen.task.id} key#${res.keyIdx + 1} ${graded.passed ? "PASS" : "FAIL"} (${res.output.latencyMs}ms, out=${res.output.outputTokens}, think=${res.output.thinkingTokens}) ${graded.detail.slice(0, 70)}`,
         );
         completedSinceFlush++;
       } else {
@@ -546,11 +699,11 @@ async function main(): Promise<void> {
 
     if (completedSinceFlush >= 5) {
       completedSinceFlush = 0;
-      flushReportFiles(db, pool, config, tasks, opts.reportPath);
+      flushReportFiles(db, pool, config, tasks, opts.reportPath, opts);
     }
   }
 
-  const finalData = flushReportFiles(db, pool, config, tasks, opts.reportPath);
+  const finalData = flushReportFiles(db, pool, config, tasks, opts.reportPath, opts);
   if (
     opts.notify &&
     !stopRequested &&

@@ -41,6 +41,9 @@ function buildRouterHeaders(decision: RoutingDecision): Record<string, string> {
     "X-Router-Model": sanitizeHeaderValue(
       `${decision.selectedProvider}/${decision.selectedModel}`,
     ),
+    ...(decision.thinkingLevel
+      ? { "X-Router-Thinking-Level": sanitizeHeaderValue(decision.thinkingLevel) }
+      : {}),
     "X-Router-Tier": sanitizeHeaderValue(
       decision.specialist
         ? `${decision.tier}:${decision.specialist}`

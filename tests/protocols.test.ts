@@ -273,6 +273,19 @@ describe("Cross-protocol translation", () => {
     expect(JSON.stringify(antBody.system)).toContain('"cache_control":{"type":"ephemeral"}');
   });
 
+  it("emits Gemini generationConfig.thinkingConfig.thinkingLevel when configured", () => {
+    const req = parseOpenAIRequest({
+      model: "auto",
+      messages: [{ role: "user", content: "Solve carefully." }],
+    });
+    req.thinkingLevel = "XHIGH";
+    const gemBody = toGeminiRequestBody(req);
+    expect(
+      (gemBody.generationConfig as { thinkingConfig?: { thinkingLevel?: string } })
+        ?.thinkingConfig,
+    ).toEqual({ thinkingLevel: "XHIGH" });
+  });
+
   it("emits valid Anthropic SSE lifecycle and OpenAI SSE chunks from CanonicalStreamEvents", async () => {
     async function* mockEvents(): AsyncGenerator<CanonicalStreamEvent> {
       yield { type: "message_start", id: "msg_1", model: "test", inputTokens: 100 };

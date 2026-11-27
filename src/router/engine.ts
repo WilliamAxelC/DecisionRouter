@@ -11,6 +11,7 @@ import type {
   RoutingDecision,
   RoutingTier,
   SpecialistKind,
+  ThinkingLevel,
 } from "../types/ir.js";
 import { verifyResponseStructurally } from "./cascade.js";
 import { extractFeatures, type RequestFeatures } from "./features.js";
@@ -260,7 +261,7 @@ export class DecisionEngine {
     const seen = new Set<string>();
     const deduped: CandidateRef[] = [];
     for (const c of baseList) {
-      const key = `${c.provider}/${c.model}`;
+      const key = `${c.provider}/${c.model}${c.thinkingLevel ? `@${c.thinkingLevel}` : ""}`;
       if (!seen.has(key)) {
         seen.add(key);
         deduped.push(c);
@@ -368,6 +369,7 @@ export class DecisionEngine {
           failovers: 0,
           selectedProvider: chosen.provider,
           selectedModel: chosen.model,
+          ...(chosen.thinkingLevel ? { thinkingLevel: chosen.thinkingLevel } : {}),
           sessionId,
           estimatedInputTokens: features.estimatedTotalTokens,
         },
@@ -418,6 +420,7 @@ export class DecisionEngine {
           failovers: 0,
           selectedProvider: chosen.provider,
           selectedModel: chosen.model,
+          ...(chosen.thinkingLevel ? { thinkingLevel: chosen.thinkingLevel } : {}),
           sessionId,
           estimatedInputTokens: features.estimatedTotalTokens,
         },
@@ -447,6 +450,7 @@ export class DecisionEngine {
           failovers: 0,
           selectedProvider: chosen.provider,
           selectedModel: chosen.model,
+          ...(chosen.thinkingLevel ? { thinkingLevel: chosen.thinkingLevel } : {}),
           sessionId,
           estimatedInputTokens: features.estimatedTotalTokens,
         },
@@ -475,6 +479,7 @@ export class DecisionEngine {
           failovers: 0,
           selectedProvider: chosen.provider,
           selectedModel: chosen.model,
+          ...(chosen.thinkingLevel ? { thinkingLevel: chosen.thinkingLevel } : {}),
           sessionId,
           estimatedInputTokens: features.estimatedTotalTokens,
         },
@@ -774,6 +779,7 @@ export class DecisionEngine {
         failovers: 0,
         selectedProvider: primary.provider,
         selectedModel: primary.model,
+        ...(primary.thinkingLevel ? { thinkingLevel: primary.thinkingLevel } : {}),
         sessionId,
         estimatedInputTokens: features.estimatedTotalTokens,
       },
@@ -791,6 +797,7 @@ export class DecisionEngine {
     result: UpstreamResult;
     provider: string;
     model: string;
+    thinkingLevel?: ThinkingLevel;
     failovers: number;
   }> {
     let lastError: unknown;
@@ -812,9 +819,12 @@ export class DecisionEngine {
       }
 
       const adapter = getUpstreamAdapter(providerCfg.type);
+      const upstreamReq = candidate.thinkingLevel
+        ? { ...req, thinkingLevel: candidate.thinkingLevel }
+        : req;
       try {
         const result = await adapter.send(
-          req,
+          upstreamReq,
           candidate.provider,
           providerCfg,
           candidate.model,
@@ -824,6 +834,7 @@ export class DecisionEngine {
           result,
           provider: candidate.provider,
           model: candidate.model,
+          thinkingLevel: candidate.thinkingLevel,
           failovers,
         };
       } catch (err) {
@@ -936,6 +947,7 @@ export class DecisionEngine {
       ...decision,
       selectedProvider: firstPass.provider,
       selectedModel: firstPass.model,
+      ...(firstPass.thinkingLevel ? { thinkingLevel: firstPass.thinkingLevel } : {}),
       failovers: firstPass.failovers,
     };
     let finalResult = firstPass.result;
@@ -975,7 +987,11 @@ export class DecisionEngine {
           features,
         ).filter(
           (c) =>
-            !(c.provider === firstPass.provider && c.model === firstPass.model),
+            !(
+              c.provider === firstPass.provider &&
+              c.model === firstPass.model &&
+              c.thinkingLevel === firstPass.thinkingLevel
+            ),
         );
 
         if (upgradeCandidates.length > 0) {
@@ -990,6 +1006,7 @@ export class DecisionEngine {
               reason: `Cascade retry (${cascadeReason}) -> ${upgradeTier}`,
               selectedProvider: secondPass.provider,
               selectedModel: secondPass.model,
+              ...(secondPass.thinkingLevel ? { thinkingLevel: secondPass.thinkingLevel } : {}),
               failovers: firstPass.failovers + secondPass.failovers,
             };
             finalResult = secondPass.result;

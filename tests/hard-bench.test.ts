@@ -56,6 +56,12 @@ class TestCases(unittest.TestCase):
     expect(
       gradeLiveBenchExact("Final order:\n**1, a, b, c**", "1, a, b, c").passed,
     ).toBe(true);
+    expect(
+      gradeLiveBenchExact(
+        "<solution>1, filmmaking, police-officer, journalist</solution>",
+        "1, filmmaking, police-officer, journalist",
+      ).passed,
+    ).toBe(true);
 
     expect(
       gradeLiveBenchData(
@@ -191,9 +197,11 @@ describe("ResilientGeminiPool backoff & state persistence", () => {
     expect(next.keyIdx).toBe(1);
     expect(next.readyAtMs).toBeGreaterThan(35_000);
 
-    // HTTP 200 clears consecutive error counter
+    // HTTP 200 clears consecutive error counter and increments dayCalls; errors do NOT burn dayCalls
+    expect(pool.getSlot(1, "gemini-4-hydrogen").dayCalls).toBe(0);
     pool.markSuccess(1, "gemini-4-hydrogen", 1200);
     expect(pool.getSlot(1, "gemini-4-hydrogen").consecutiveErrors).toBe(0);
+    expect(pool.getSlot(1, "gemini-4-hydrogen").dayCalls).toBe(1);
     db.close();
   });
 

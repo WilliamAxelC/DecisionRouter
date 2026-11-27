@@ -30,9 +30,18 @@ export const ProviderConfigSchema = z.object({
   models: z.record(ModelConfigSchema).default({}),
 });
 
+export const ThinkingLevelSchema = z.enum([
+  "MINIMAL",
+  "LOW",
+  "MEDIUM",
+  "HIGH",
+  "XHIGH",
+]);
+
 export const CandidateRefSchema = z.object({
   provider: z.string().min(1),
   model: z.string().min(1),
+  thinkingLevel: ThinkingLevelSchema.optional(),
 });
 
 export const DecisionModelEntrySchema = z.object({

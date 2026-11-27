@@ -23,7 +23,8 @@
     "bench:industry:live-decision": "tsx bench/industry/run.ts --mode live-decision --config config.yaml",
     "bench:industry:live": "tsx bench/industry/run.ts --mode live --config config.yaml --sample 6",
     "bench:pareto": "tsx bench/industry/pareto.ts --config config.yaml",
-    "bench:hard": "tsx bench/hard/run.ts --config config.yaml"
+    "bench:hard": "tsx bench/hard/run.ts --config config.yaml",
+    "bench:hard:effort": "tsx bench/hard/run.ts --config config.yaml --light-model gemini-4-hydrogen --light-thinking LOW --high-model gemini-4-hydrogen --high-thinking XHIGH --db data/benchmarks/hard-suite/effort-bench.db --seed-decisions data/benchmarks/hard-suite/hard-bench.db --max-hours 72"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",

@@ -1,5 +1,7 @@
 export type ProviderType = "openai" | "anthropic" | "gemini";
 
+export type ThinkingLevel = "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | "XHIGH";
+
 export type IncomingProtocol = "openai" | "anthropic";
 
 export type RoutingTier =
@@ -112,6 +114,7 @@ export interface CanonicalRequest {
   temperature?: number;
   topP?: number;
   stopSequences?: string[];
+  thinkingLevel?: ThinkingLevel;
   stream: boolean;
   headers: Record<string, string>;
 }
@@ -157,6 +160,7 @@ export interface ModelPricing {
 export interface CandidateRef {
   provider: string;
   model: string;
+  thinkingLevel?: ThinkingLevel;
 }
 
 export interface RoutingDecision {
@@ -175,6 +179,7 @@ export interface RoutingDecision {
   failovers: number;
   selectedProvider: string;
   selectedModel: string;
+  thinkingLevel?: ThinkingLevel;
   sessionId: string;
   estimatedInputTokens: number;
 }
